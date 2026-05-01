@@ -93,6 +93,7 @@ export interface MappingProfile {
 export interface WorkerProfile {
   id: string;
   name: string;
+  rawId?: string;
   company: string;
   brandOrShow: string;
   push: string;
@@ -110,6 +111,76 @@ export interface WorkerProfile {
   lastBooked: string;
   warnings: string[];
   creativeNotes: CreativeNotes;
+}
+
+export interface MatchRecord {
+  id: string;
+  eventName: string;
+  eventDate: string;
+  showType: string;
+  matchOrder: number | null;
+  matchType: string;
+  participants: string[];
+  winner: string;
+  loser: string;
+  titleInvolved: string;
+  rating: number | null;
+  showRating: number | null;
+  length: string;
+}
+
+export interface SegmentRecord {
+  id: string;
+  eventName: string;
+  eventDate: string;
+  segmentOrder: number | null;
+  segmentType: string;
+  participants: string[];
+  storyline: string;
+  titleInvolved: string;
+  rating: number | null;
+  showRating: number | null;
+  length: string;
+}
+
+export interface TitleRecord {
+  id: string;
+  name: string;
+  company: string;
+  champion: string;
+  lastDefenceDate: string;
+  daysSinceLastDefence: number | null;
+  recentDefences: number;
+  recentChallengers: string[];
+  warningStatus: Severity;
+}
+
+export interface PushMismatchResult {
+  worker: WorkerProfile;
+  officialPush: string;
+  recommendedTier: string;
+  score: number;
+  label: string;
+  severity: Severity;
+  evidence: string[];
+  suggestedAction: string;
+}
+
+export interface SaveAnalysis {
+  workers: WorkerProfile[];
+  titles: TitleRecord[];
+  matches: MatchRecord[];
+  segments: SegmentRecord[];
+  diagnostics: Diagnostic[];
+  weeklyPriorities: WeeklyPriority[];
+  pushMismatch: PushMismatchResult[];
+  promotions: string[];
+  tableSummary: Array<{
+    name: string;
+    rowCount: number;
+    columns: string[];
+  }>;
+  unmapped: string[];
 }
 
 export interface CreativeNotes {

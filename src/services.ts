@@ -12,6 +12,7 @@ import type {
 } from "./types";
 
 const configKey = "pws-save-auditor-config";
+const browserSampleLimit = 2000;
 
 export const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -190,7 +191,7 @@ function inspectBrowserTables(database: import("sql.js").Database): TableInfo[] 
 
     const rowCountResult = database.exec(`SELECT COUNT(*) AS count FROM ${escapedName}`);
     const rowCount = Number(rowCountResult[0]?.values[0]?.[0] ?? 0);
-    const sampleResult = database.exec(`SELECT * FROM ${escapedName} LIMIT 3`);
+    const sampleResult = database.exec(`SELECT * FROM ${escapedName} LIMIT ${browserSampleLimit}`);
     const sampleRows =
       sampleResult[0]?.values.map((row) =>
         Object.fromEntries(sampleResult[0].columns.map((column, index) => [column, row[index]])),
@@ -222,13 +223,21 @@ function inferLikelyMappings(tables: TableInfo[]): DatabaseInspection["likelyMap
 }
 
 function findTable(tables: TableInfo[], keywords: string[]): string | null {
-  return (
-    tables.find((table) => {
+  const scored = tables
+    .map((table) => {
       const tableName = table.name.toLowerCase();
       const columns = table.columns.map((column) => column.name.toLowerCase()).join(" ");
-      return keywords.some((keyword) => tableName.includes(keyword) || columns.includes(keyword));
-    })?.name ?? null
-  );
+      const score = keywords.reduce((total, keyword) => {
+        const tableHit = tableName.includes(keyword) ? 3 : 0;
+        const columnHit = columns.includes(keyword) ? 1 : 0;
+        return total + tableHit + columnHit;
+      }, 0);
+      return { table, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || (b.table.rowCount ?? 0) - (a.table.rowCount ?? 0));
+
+  return scored[0]?.table.name ?? null;
 }
 
 function escapeIdentifier(identifier: string): string {

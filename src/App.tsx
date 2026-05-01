@@ -12,14 +12,11 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { buildSaveAnalysis } from "./analysis";
 import {
   defaultPushFitSettings,
-  demoWorkers,
-  diagnostics,
-  emptyCreativeNotes,
   mappingFields,
   navItems,
-  weeklyPriorities,
 } from "./data";
 import {
   browseForSave,
@@ -37,6 +34,7 @@ import type {
   AppConfig,
   DatabaseInspection,
   MappingProfile,
+  SaveAnalysis,
   SaveCandidate,
   SnapshotMetadata,
   TabKey,
@@ -85,13 +83,16 @@ export function App() {
 
   const selectedPromotion = config.selectedPromotion || "ROH";
   const latestSnapshot = snapshots[0] ?? null;
-  const rosterWorkers = useMemo(() => buildRoster(inspection, selectedPromotion), [
+  const analysis = useMemo(() => buildSaveAnalysis(inspection, selectedPromotion, config.ignoredWorkers, mappingProfile), [
     inspection,
     selectedPromotion,
+    config.ignoredWorkers,
+    mappingProfile,
   ]);
+  const rosterWorkers = analysis.workers;
   const activeRoster = rosterWorkers.filter((worker) => includedWorkers[worker.id] !== false);
   const pushGroups = groupBy(activeRoster, (worker) => worker.push || "Unmapped");
-  const promotionOptions = useMemo(() => derivePromotions(inspection), [inspection]);
+  const promotionOptions = analysis.promotions.length ? analysis.promotions : ["ROH", "Custom company"];
   const tableColumnOptions = useMemo(() => buildTableColumnOptions(inspection), [inspection]);
 
   async function persistConfig(nextConfig: AppConfig) {
@@ -290,15 +291,16 @@ export function App() {
                 latestSnapshot={latestSnapshot}
                 activeRoster={activeRoster}
                 inspection={inspection}
+                analysis={analysis}
               />
             ) : null}
-            {activeTab === "weekly-priorities" ? <WeeklyPriorities /> : null}
+            {activeTab === "weekly-priorities" ? <WeeklyPriorities analysis={analysis} /> : null}
             {activeTab === "roster-audit" ? <RosterAudit workers={activeRoster} /> : null}
             {activeTab === "push-groups" ? <PushGroups pushGroups={pushGroups} /> : null}
-            {activeTab === "push-mismatch" ? <PushMismatch workers={activeRoster} /> : null}
-            {activeTab === "ratings-analytics" ? <RatingsAnalytics workers={activeRoster} /> : null}
-            {activeTab === "titles" ? <Titles selectedPromotion={selectedPromotion} /> : null}
-            {activeTab === "booking-warnings" ? <BookingWarnings /> : null}
+            {activeTab === "push-mismatch" ? <PushMismatch analysis={analysis} /> : null}
+            {activeTab === "ratings-analytics" ? <RatingsAnalytics analysis={analysis} /> : null}
+            {activeTab === "titles" ? <Titles selectedPromotion={selectedPromotion} analysis={analysis} /> : null}
+            {activeTab === "booking-warnings" ? <BookingWarnings analysis={analysis} /> : null}
             {activeTab === "ppv-build-checker" ? <PpvBuildChecker /> : null}
             {activeTab === "snapshot-comparison" ? (
               <SnapshotComparison snapshots={snapshots} />
@@ -308,6 +310,7 @@ export function App() {
                 selectedSave={selectedSave}
                 selectedPromotion={selectedPromotion}
                 mappingProfile={mappingProfile}
+                analysis={analysis}
               />
             ) : null}
           </div>
@@ -478,17 +481,21 @@ function Dashboard({
   latestSnapshot,
   activeRoster,
   inspection,
+  analysis,
 }: {
   selectedPromotion: string;
   latestSnapshot: SnapshotMetadata | null;
   activeRoster: WorkerProfile[];
   inspection: DatabaseInspection | null;
+  analysis: SaveAnalysis;
 }) {
   const champions = activeRoster.filter((worker) => worker.currentTitles.length > 0);
   const mainEventCount = activeRoster.filter((worker) => /main/i.test(worker.push)).length;
-  const womenCount = activeRoster.filter((worker) =>
-    worker.currentTitles.some((title) => title.toLowerCase().includes("women")),
-  ).length;
+  const womenCount = activeRoster.filter((worker) => /women|woman|female/i.test(`${worker.currentTitles.join(" ")} ${worker.brandOrShow}`)).length;
+  const warningCount = analysis.diagnostics.filter((item) => item.severity === "High" || item.severity === "Critical").length;
+  const titleWarnings = analysis.titles.filter((title) => title.warningStatus !== "Low").length;
+  const avgMatch = average(activeRoster.map((worker) => worker.recentMatchRatingAverage ?? 0).filter(Boolean));
+  const avgSegment = average(activeRoster.map((worker) => worker.recentSegmentRatingAverage ?? 0).filter(Boolean));
 
   return (
     <div className="space-y-5">
@@ -496,22 +503,42 @@ function Dashboard({
         <Metric label="Selected Promotion" value={selectedPromotion} severity="Low" />
         <Metric label="Active Roster Count" value={String(activeRoster.length)} severity="Low" />
         <Metric label="Last Imported Snapshot" value={latestSnapshot ? formatDate(latestSnapshot.importedDate) : "None"} severity={latestSnapshot ? "Low" : "High"} />
-        <Metric label="Current In-Game Date" value={inspection ? "Map Event Date to enable" : "Not imported"} severity="Medium" />
+        <Metric label="Imported Tables" value={inspection ? String(inspection.tables.length) : "0"} severity={inspection ? "Low" : "Medium"} />
       </div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Overall Save Health" value="74" severity="Medium" />
-        <Metric label="Roster Balance" value="68" severity="Medium" />
+        <Metric label="Booking Warnings" value={String(warningCount)} severity={warningCount ? "High" : "Low"} />
+        <Metric label="Title Management" value={titleWarnings ? `${titleWarnings} warnings` : "Clear"} severity={titleWarnings ? "High" : "Low"} />
         <Metric label="Main Event Push Group" value={`${mainEventCount} workers`} severity="Low" />
-        <Metric label="Women’s Division Depth" value={womenCount ? `${womenCount}+ tracked` : "Needs mapping"} severity="Medium" />
-        <Metric label="Title Management" value="High attention" severity="High" />
-        <Metric label="Morale Risk" value="Medium" severity="Medium" />
-        <Metric label="Fatigue Risk" value="Medium" severity="Medium" />
-        <Metric label="Booking Variety" value="Pending match mapping" severity="Medium" />
+        <Metric label="Women's Division Depth" value={womenCount ? `${womenCount}+ tracked` : "Needs mapping"} severity="Medium" />
+        <Metric label="Match Rating Health" value={avgMatch ? String(avgMatch) : "Needs mapping"} severity={avgMatch ? "Low" : "Medium"} />
+        <Metric label="Segment Rating Health" value={avgSegment ? String(avgSegment) : "Needs mapping"} severity={avgSegment ? "Low" : "Medium"} />
+        <Metric label="Imported Matches" value={String(analysis.matches.length)} severity={analysis.matches.length ? "Low" : "Medium"} />
+        <Metric label="Imported Segments" value={String(analysis.segments.length)} severity={analysis.segments.length ? "Low" : "Medium"} />
       </div>
+      {analysis.unmapped.length ? (
+        <section className="rounded-md border border-roh-gold/30 bg-roh-gold/10 p-5">
+          <h3 className="text-lg font-semibold tracking-normal text-amber-100">Mapping Attention</h3>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {analysis.unmapped.map((item) => (
+              <div key={item} className="rounded-md bg-deck-900/70 px-3 py-2 text-sm text-amber-100">
+                {item}
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <section className="rounded-md border border-white/10 bg-deck-900 p-5">
         <h3 className="mb-4 text-lg font-semibold tracking-normal">Current Champions</h3>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {champions.length ? (
+          {analysis.titles.length ? (
+            analysis.titles.map((title) => (
+              <div key={title.id} className="rounded-md border border-white/10 bg-deck-850 p-4">
+                <p className="font-semibold">{title.name}</p>
+                <p className="mt-1 text-sm text-roh-gold">{title.champion || "Champion unmapped"}</p>
+                <p className="mt-2 text-sm text-slate-400">Last defence: {title.lastDefenceDate}</p>
+              </div>
+            ))
+          ) : champions.length ? (
             champions.map((worker) => (
               <div key={worker.id} className="rounded-md border border-white/10 bg-deck-850 p-4">
                 <p className="font-semibold">{worker.name}</p>
@@ -564,6 +591,20 @@ function MappingScreen({
           <div key={key} className="rounded-md border border-white/10 bg-deck-850 p-3">
             <p className="text-xs uppercase text-slate-500">{splitCamel(key)}</p>
             <p className="mt-1 text-sm font-semibold">{value || "Unmapped"}</p>
+          </div>
+        ))}
+      </div>
+      <div className="mb-5 max-h-80 overflow-y-auto rounded-md border border-white/10 bg-deck-850">
+        <div className="sticky top-0 grid grid-cols-[1fr_6rem_2fr] gap-3 border-b border-white/10 bg-deck-900 px-3 py-2 text-xs uppercase text-slate-500">
+          <span>Table</span>
+          <span>Rows</span>
+          <span>Columns</span>
+        </div>
+        {inspection.tables.map((table) => (
+          <div key={table.name} className="grid grid-cols-[1fr_6rem_2fr] gap-3 border-b border-white/5 px-3 py-2 text-sm last:border-b-0">
+            <span className="font-semibold text-slate-200">{table.name}</span>
+            <span className="text-slate-400">{table.rowCount ?? table.sampleRows.length}</span>
+            <span className="break-words text-slate-400">{table.columns.map((column) => column.name).join(", ")}</span>
           </div>
         ))}
       </div>
@@ -653,10 +694,11 @@ function PromotionAndRoster({
   );
 }
 
-function WeeklyPriorities() {
+function WeeklyPriorities({ analysis }: { analysis: SaveAnalysis }) {
+  const priorities = analysis.weeklyPriorities;
   return (
     <div className="space-y-3">
-      {weeklyPriorities.map((priority) => (
+      {priorities.length ? priorities.map((priority) => (
         <div key={priority.priorityNumber} className="rounded-md border border-white/10 bg-deck-900 p-5">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -668,7 +710,7 @@ function WeeklyPriorities() {
           <p className="mt-3 text-slate-200">{priority.suggestedAction}</p>
           <p className="mt-2 text-sm text-slate-400">{priority.relatedItem} | {priority.supportingEvidence}</p>
         </div>
-      ))}
+      )) : <EmptyState text="Import a save with roster, titles, match or segment data to generate weekly priorities." />}
     </div>
   );
 }
@@ -745,7 +787,7 @@ function PushGroups({ pushGroups }: { pushGroups: Record<string, WorkerProfile[]
   );
 }
 
-function PushMismatch({ workers }: { workers: WorkerProfile[] }) {
+function PushMismatch({ analysis }: { analysis: SaveAnalysis }) {
   return (
     <div className="space-y-4">
       <section className="rounded-md border border-white/10 bg-deck-900 p-5">
@@ -760,77 +802,116 @@ function PushMismatch({ workers }: { workers: WorkerProfile[] }) {
         </div>
       </section>
       <div className="grid gap-4 xl:grid-cols-2">
-        {workers.map((worker) => {
-          const score = pushFitScore(worker);
-          const label = score > 82 && !/main/i.test(worker.push) ? "Possible Upward Movement" : score < 50 && /main|upper/i.test(worker.push) ? "High Push Mismatch" : "Correctly Positioned";
-          return (
-            <section key={worker.id} className="rounded-md border border-white/10 bg-deck-900 p-5">
+        {analysis.pushMismatch.length ? (
+          analysis.pushMismatch.map((item) => (
+            <section key={item.worker.id} className="rounded-md border border-white/10 bg-deck-900 p-5">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h3 className="text-lg font-semibold tracking-normal">{worker.name}</h3>
-                  <p className="text-sm text-slate-400">Official Push: {worker.push}</p>
+                  <h3 className="text-lg font-semibold tracking-normal">{item.worker.name}</h3>
+                  <p className="text-sm text-slate-400">Official Push: {item.officialPush}</p>
+                  <p className="mt-1 text-sm text-slate-400">Recommended tier: {item.recommendedTier}</p>
                 </div>
-                <StatusPill label={label} tone={label === "High Push Mismatch" ? "bad" : label === "Possible Upward Movement" ? "warn" : "good"} />
+                <StatusPill label={item.label} tone={item.severity === "High" || item.severity === "Critical" ? "bad" : item.severity === "Medium" ? "warn" : "good"} />
               </div>
               <div className="mt-4 h-3 overflow-hidden rounded-full bg-deck-800">
-                <div className="h-full bg-roh-gold" style={{ width: `${score}%` }} />
+                <div className="h-full bg-roh-gold" style={{ width: `${item.score}%` }} />
               </div>
               <p className="mt-3 text-sm text-slate-300">
-                Push Fit Score {score}. Evidence: popularity {worker.popularity}, momentum {worker.momentum}, record {worker.recentRecord}, match average {worker.recentMatchRatingAverage ?? "unmapped"}.
+                Push Fit Score {item.score}. Evidence: {item.evidence.join("; ")}.
               </p>
-              <p className="mt-2 text-sm text-slate-400">
-                Suggested action: give credible wins, test against a higher Push worker, cool down, or mark Creative Override Active if the direction is intentional.
-              </p>
+              <p className="mt-2 text-sm text-slate-400">Suggested action: {item.suggestedAction}</p>
             </section>
-          );
-        })}
+          ))
+        ) : (
+          <EmptyState text="Import roster data to calculate Push Fit Score and Push Mismatch diagnostics." />
+        )}
       </div>
     </div>
   );
 }
 
-function RatingsAnalytics({ workers }: { workers: WorkerProfile[] }) {
-  const sortedMatches = [...workers].sort((a, b) => (b.recentMatchRatingAverage ?? 0) - (a.recentMatchRatingAverage ?? 0));
-  const sortedSegments = [...workers].sort((a, b) => (b.recentSegmentRatingAverage ?? 0) - (a.recentSegmentRatingAverage ?? 0));
+function RatingsAnalytics({ analysis }: { analysis: SaveAnalysis }) {
+  const sortedMatches = [...analysis.workers].sort((a, b) => (b.recentMatchRatingAverage ?? 0) - (a.recentMatchRatingAverage ?? 0));
+  const sortedSegments = [...analysis.workers].sort((a, b) => (b.recentSegmentRatingAverage ?? 0) - (a.recentSegmentRatingAverage ?? 0));
+  const matchTypes = ratingAveragesByKey(analysis.matches, "matchType");
+  const segmentTypes = ratingAveragesByKey(analysis.segments, "segmentType");
+  const showRatings = ratingAveragesByKey([...analysis.matches, ...analysis.segments], "eventName");
+  const chemistry = chemistryPairings(analysis);
+  const betterInMatches = analysis.workers
+    .filter((worker) => (worker.recentMatchRatingAverage ?? 0) - (worker.recentSegmentRatingAverage ?? 0) >= 10)
+    .slice(0, 6);
+  const betterInSegments = analysis.workers
+    .filter((worker) => (worker.recentSegmentRatingAverage ?? 0) - (worker.recentMatchRatingAverage ?? 0) >= 10)
+    .slice(0, 6);
+
   return (
     <div className="grid gap-4 xl:grid-cols-2">
       <Ranking title="Top Recent Match Performers" workers={sortedMatches} valueKey="recentMatchRatingAverage" />
       <Ranking title="Top Recent Segment Performers" workers={sortedSegments} valueKey="recentSegmentRatingAverage" />
-      <AnalysisCard title="Strongest Chemistry Pairings" text="Requires confirmed Match Participants and Segment Participants mapping." />
-      <AnalysisCard title="Biggest Rating Fallers" text="Available after two snapshots with mapped ratings are imported." />
-      <AnalysisCard title="Match Types Producing Best Ratings" text="Requires Match Type and Match Rating mapping." />
-      <AnalysisCard title="Segment Types Producing Best Ratings" text="Requires Segment Type and Segment Rating mapping." />
+      <ListCard title="Strongest Chemistry Pairings" items={chemistry.best.map((item) => `${item.name}: ${item.average} average across ${item.count} appearances`)} empty="Requires repeated mapped match or segment participants with ratings." />
+      <ListCard title="Worst Chemistry Pairings" items={chemistry.worst.map((item) => `${item.name}: ${item.average} average across ${item.count} appearances`)} empty="Requires repeated mapped match or segment participants with ratings." />
+      <ListCard title="Match Types Producing Best Ratings" items={matchTypes.map((item) => `${item.name}: ${item.average} average from ${item.count}`)} empty="Requires Match Type and Match Rating mapping." />
+      <ListCard title="Segment Types Producing Best Ratings" items={segmentTypes.map((item) => `${item.name}: ${item.average} average from ${item.count}`)} empty="Requires Segment Type and Segment Rating mapping." />
+      <ListCard title="Shows With Best Overall Ratings" items={showRatings.slice(0, 6).map((item) => `${item.name}: ${item.average} average from ${item.count}`)} empty="Requires Event Name and ratings mapping." />
+      <ListCard title="Better In Matches Than Segments" items={betterInMatches.map((worker) => `${worker.name}: match ${worker.recentMatchRatingAverage}, segment ${worker.recentSegmentRatingAverage}`)} empty="No clear match-over-segment split detected yet." />
+      <ListCard title="Better In Segments Than Matches" items={betterInSegments.map((worker) => `${worker.name}: segment ${worker.recentSegmentRatingAverage}, match ${worker.recentMatchRatingAverage}`)} empty="No clear segment-over-match split detected yet." />
     </div>
   );
 }
 
-function Titles({ selectedPromotion }: { selectedPromotion: string }) {
+function Titles({ selectedPromotion, analysis }: { selectedPromotion: string; analysis: SaveAnalysis }) {
   return (
     <section className="rounded-md border border-white/10 bg-deck-900 p-5">
       <h3 className="text-xl font-semibold tracking-normal">{selectedPromotion} Title Audit</h3>
       <div className="mt-4 grid gap-3 xl:grid-cols-2">
-        <AnalysisCard title="ROH World Championship" text="Champion: Mark Briscoe. Warning: last defence and recent challengers need mapped title history for exact audit." />
-        <AnalysisCard title="ROH Women's World Championship" text="Champion: Athena. Planned challenger and Planned Title Direction are user-created planning fields." />
+        {analysis.titles.length ? (
+          analysis.titles.map((title) => (
+            <div key={title.id} className="rounded-md border border-white/10 bg-deck-850 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="font-semibold">{title.name}</p>
+                  <p className="mt-1 text-sm text-roh-gold">Champion: {title.champion || "Unmapped"}</p>
+                </div>
+                <SeverityPill severity={title.warningStatus} />
+              </div>
+              <div className="mt-3 grid gap-2 text-sm text-slate-400 md:grid-cols-2">
+                <p>Last defence: {title.lastDefenceDate}</p>
+                <p>Days since defence: {title.daysSinceLastDefence ?? "Unmapped"}</p>
+                <p>Recent defences: {title.recentDefences}</p>
+                <p>Recent challengers: {title.recentChallengers.join(", ") || "Unmapped"}</p>
+              </div>
+              <p className="mt-3 text-sm text-slate-300">
+                Planned challenger and Planned Title Direction are user-created planning fields. Title holder and defence data come from the imported save where mapped.
+              </p>
+            </div>
+          ))
+        ) : (
+          <EmptyState text="No title table was confidently mapped yet. Use Database Mapping to confirm Title, Title Holder and Last Defence fields if the save uses unusual column names." />
+        )}
       </div>
     </section>
   );
 }
 
-function BookingWarnings() {
+function BookingWarnings({ analysis }: { analysis: SaveAnalysis }) {
   return (
     <div className="space-y-4">
-      {diagnostics.map((diagnostic) => (
-        <section key={diagnostic.id} className="rounded-md border border-white/10 bg-deck-900 p-5">
-          <div className="flex items-start justify-between gap-4">
-            <h3 className="text-xl font-semibold tracking-normal">{diagnostic.problem}</h3>
-            <SeverityPill severity={diagnostic.severity} />
-          </div>
-          <p className="mt-3 text-sm text-slate-300">Evidence: {diagnostic.evidence}</p>
-          <p className="mt-2 text-sm text-slate-400">Why it matters: {diagnostic.whyItMatters}</p>
-          <p className="mt-2 text-sm text-slate-200">Suggested fix: {diagnostic.suggestedFix}</p>
-          <p className="mt-2 text-sm text-roh-gold">Example booking action: {diagnostic.exampleBookingAction}</p>
-        </section>
-      ))}
+      {analysis.diagnostics.length ? (
+        analysis.diagnostics.map((diagnostic) => (
+          <section key={diagnostic.id} className="rounded-md border border-white/10 bg-deck-900 p-5">
+            <div className="flex items-start justify-between gap-4">
+              <h3 className="text-xl font-semibold tracking-normal">{diagnostic.problem}</h3>
+              <SeverityPill severity={diagnostic.severity} />
+            </div>
+            <p className="mt-3 text-sm text-slate-300">Evidence: {diagnostic.evidence}</p>
+            <p className="mt-2 text-sm text-slate-400">Why it matters: {diagnostic.whyItMatters}</p>
+            <p className="mt-2 text-sm text-slate-200">Suggested fix: {diagnostic.suggestedFix}</p>
+            <p className="mt-2 text-sm text-roh-gold">Example booking action: {diagnostic.exampleBookingAction}</p>
+          </section>
+        ))
+      ) : (
+        <EmptyState text="No booking warnings yet. Import roster, title, match and segment data to generate diagnostics." />
+      )}
     </div>
   );
 }
@@ -881,11 +962,22 @@ function SettingsPanel({
   selectedSave,
   selectedPromotion,
   mappingProfile,
+  analysis,
 }: {
   selectedSave: string | null;
   selectedPromotion: string;
   mappingProfile: MappingProfile;
+  analysis: SaveAnalysis;
 }) {
+  const exportItems = [
+    "Full save audit",
+    "Weekly priorities",
+    "Title audit",
+    "Push Mismatch report",
+    "Ratings Analytics report",
+    "Snapshot comparison report",
+  ];
+
   return (
     <div className="space-y-4">
       <section className="rounded-md border border-white/10 bg-deck-900 p-5">
@@ -911,8 +1003,8 @@ function SettingsPanel({
       <section className="rounded-md border border-white/10 bg-deck-900 p-5">
         <h3 className="text-lg font-semibold tracking-normal">Exports</h3>
         <div className="mt-4 flex flex-wrap gap-3">
-          {["Full save audit", "Weekly priorities", "Title audit", "Push Mismatch report", "Ratings Analytics report", "Snapshot comparison report"].map((label) => (
-            <BigButton key={label} icon={FileDown} label={label} variant="secondary" onClick={() => undefined} />
+          {exportItems.map((label) => (
+            <BigButton key={label} icon={FileDown} label={label} variant="secondary" onClick={() => downloadReport(label, analysis)} />
           ))}
         </div>
       </section>
@@ -990,6 +1082,25 @@ function Ranking({
   );
 }
 
+function ListCard({ title, items, empty }: { title: string; items: string[]; empty: string }) {
+  return (
+    <section className="rounded-md border border-white/10 bg-deck-900 p-5">
+      <h3 className="text-lg font-semibold tracking-normal">{title}</h3>
+      <div className="mt-3 space-y-2">
+        {items.length ? (
+          items.map((item) => (
+            <div key={item} className="rounded-md bg-deck-850 px-3 py-2 text-sm text-slate-300">
+              {item}
+            </div>
+          ))
+        ) : (
+          <p className="rounded-md border border-dashed border-white/15 bg-deck-850 p-3 text-sm text-slate-400">{empty}</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function AnalysisCard({ title, text }: { title: string; text: string }) {
   return (
     <div className="rounded-md border border-white/10 bg-deck-850 p-4">
@@ -1037,68 +1148,6 @@ function SeverityPill({ severity }: { severity: "Low" | "Medium" | "High" | "Cri
   return <StatusPill label={severity} tone={tone} />;
 }
 
-function buildRoster(inspection: DatabaseInspection | null, selectedPromotion: string): WorkerProfile[] {
-  if (!inspection) {
-    return demoWorkers;
-  }
-
-  const workersTableName = inspection.likelyMappings.workersTable;
-  const workersTable = inspection.tables.find((table) => table.name === workersTableName);
-  if (!workersTable || workersTable.sampleRows.length === 0) {
-    return demoWorkers.filter((worker) => worker.company === selectedPromotion);
-  }
-
-  const rows = workersTable.sampleRows;
-  return rows
-    .map((row, index) => {
-      const name = pickString(row, ["name", "worker_name", "wrestler_name", "full_name"]) || `Worker ${index + 1}`;
-      const company = pickString(row, ["company", "promotion", "fed"]) || selectedPromotion;
-      return {
-        id: slug(name),
-        name,
-        company,
-        brandOrShow: pickString(row, ["brand", "show", "brand_or_show"]) || "",
-        push: pickString(row, ["push", "card_position", "position"]) || "Unmapped",
-        disposition: pickString(row, ["disposition", "alignment", "face_heel"]) || "Unmapped",
-        popularity: pickNumber(row, ["popularity", "pop"]) ?? 0,
-        momentum: pickNumber(row, ["momentum"]) ?? 0,
-        morale: pickNumber(row, ["morale"]) ?? 0,
-        fatigue: pickNumber(row, ["fatigue"]) ?? 0,
-        injuryStatus: pickString(row, ["injury_status", "injury", "status"]) || "Unmapped",
-        contractStatus: pickString(row, ["contract_status", "contract"]) || "Unmapped",
-        currentTitles: [],
-        recentRecord: "Unmapped",
-        recentMatchRatingAverage: null,
-        recentSegmentRatingAverage: null,
-        lastBooked: "Unmapped",
-        warnings: [],
-        creativeNotes: { ...emptyCreativeNotes },
-      };
-    })
-    .filter((worker) => worker.company === selectedPromotion || selectedPromotion === "Custom company");
-}
-
-function derivePromotions(inspection: DatabaseInspection | null): string[] {
-  if (!inspection) {
-    return ["ROH", "AEW", "WWE", "NJPW", "Custom company"];
-  }
-
-  const companiesTable = inspection.tables.find((table) => table.name === inspection.likelyMappings.companiesTable);
-  const values = new Set<string>();
-  companiesTable?.sampleRows.forEach((row) => {
-    const value = pickString(row, ["name", "company", "promotion"]);
-    if (value) {
-      values.add(value);
-    }
-  });
-
-  if (!values.size) {
-    values.add("ROH");
-    values.add("Custom company");
-  }
-  return [...values];
-}
-
 function buildTableColumnOptions(inspection: DatabaseInspection | null): string[] {
   if (!inspection) {
     return [];
@@ -1122,68 +1171,74 @@ function average(values: number[]): number {
   return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
 }
 
-function pushFitScore(worker: WorkerProfile): number {
-  const ratingsAverage = average([
-    worker.recentMatchRatingAverage ?? 50,
-    worker.recentSegmentRatingAverage ?? 50,
-  ]);
-  const availability = Math.max(0, 100 - worker.fatigue);
-  return Math.round(
-    worker.popularity * 0.35 +
-      worker.momentum * 0.25 +
-      credibilityFromRecord(worker.recentRecord) * 0.15 +
-      ratingsAverage * 0.15 +
-      availability * 0.1,
-  );
+function ratingAveragesByKey<T extends { rating: number | null }>(
+  records: T[],
+  key: keyof T,
+): Array<{ name: string; average: number; count: number }> {
+  const groups = new Map<string, number[]>();
+  records.forEach((record) => {
+    if (typeof record.rating !== "number") return;
+    const name = String(record[key] || "Unmapped");
+    if (!name || name === "Unmapped") return;
+    groups.set(name, [...(groups.get(name) || []), record.rating]);
+  });
+
+  return [...groups.entries()]
+    .map(([name, values]) => ({ name, average: average(values), count: values.length }))
+    .sort((a, b) => b.average - a.average || b.count - a.count)
+    .slice(0, 8);
 }
 
-function credibilityFromRecord(record: string): number {
-  const match = record.match(/(\d+)-(\d+)/);
-  if (!match) {
-    return 50;
-  }
-  const wins = Number(match[1]);
-  const losses = Number(match[2]);
-  const total = wins + losses;
-  return total ? Math.round((wins / total) * 100) : 50;
+function chemistryPairings(analysis: SaveAnalysis): {
+  best: Array<{ name: string; average: number; count: number }>;
+  worst: Array<{ name: string; average: number; count: number }>;
+} {
+  const pairRatings = new Map<string, number[]>();
+  [...analysis.matches, ...analysis.segments].forEach((record) => {
+    if (typeof record.rating !== "number" || record.participants.length < 2) return;
+    const participants = [...new Set(record.participants.filter(Boolean))].sort();
+    for (let left = 0; left < participants.length; left += 1) {
+      for (let right = left + 1; right < participants.length; right += 1) {
+        const pair = `${participants[left]} / ${participants[right]}`;
+        pairRatings.set(pair, [...(pairRatings.get(pair) || []), record.rating]);
+      }
+    }
+  });
+
+  const pairings = [...pairRatings.entries()]
+    .map(([name, values]) => ({ name, average: average(values), count: values.length }))
+    .filter((item) => item.count >= 2);
+
+  return {
+    best: [...pairings].sort((a, b) => b.average - a.average || b.count - a.count).slice(0, 6),
+    worst: [...pairings].sort((a, b) => a.average - b.average || b.count - a.count).slice(0, 6),
+  };
 }
 
-function pickString(row: Record<string, unknown>, keys: string[]): string | null {
-  const lowerRow = lowerCaseKeys(row);
-  for (const key of keys) {
-    const value = lowerRow[key.toLowerCase()];
-    if (typeof value === "string" && value.trim()) {
-      return value;
-    }
-    if (typeof value === "number") {
-      return String(value);
-    }
-  }
-  return null;
-}
-
-function pickNumber(row: Record<string, unknown>, keys: string[]): number | null {
-  const lowerRow = lowerCaseKeys(row);
-  for (const key of keys) {
-    const value = lowerRow[key.toLowerCase()];
-    if (typeof value === "number") {
-      return value;
-    }
-    if (typeof value === "string" && value.trim() && !Number.isNaN(Number(value))) {
-      return Number(value);
-    }
-  }
-  return null;
-}
-
-function lowerCaseKeys(row: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key.toLowerCase(), value]));
+function downloadReport(label: string, analysis: SaveAnalysis) {
+  const fileBase = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+  const payload = {
+    report: label,
+    exportedAt: new Date().toISOString(),
+    workers: analysis.workers,
+    titles: analysis.titles,
+    weeklyPriorities: analysis.weeklyPriorities,
+    diagnostics: analysis.diagnostics,
+    pushMismatch: analysis.pushMismatch,
+    matches: analysis.matches,
+    segments: analysis.segments,
+    tableSummary: analysis.tableSummary,
+    unmapped: analysis.unmapped,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${fileBase || "pws-save-auditor-report"}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function splitCamel(value: string): string {
   return value.replace(/([A-Z])/g, " $1").replace(/^./, (first) => first.toUpperCase());
-}
-
-function slug(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
