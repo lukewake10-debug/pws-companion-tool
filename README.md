@@ -75,7 +75,7 @@ npm run build
 
 ## Browser Mode
 
-The project also builds as a browser app for Steam Deck Gaming Mode. Browser mode cannot scan Steam folders automatically, but it can read a save file selected by the user with the file picker. SQLite inspection runs locally in the browser through `sql.js`; the save is not uploaded to a server.
+The project also builds as a browser app for Steam Deck Gaming Mode. Browser mode cannot scan Steam folders automatically, but it can read a save file selected by the user with the file picker. SQLite inspection runs locally in the browser through the `sql.js` asm build; the save is not uploaded to a server.
 
 The GitHub Pages workflow publishes the browser build from `dist/`.
 

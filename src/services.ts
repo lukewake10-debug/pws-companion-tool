@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import initSqlJs from "sql.js";
+import initSqlJs from "sql.js/dist/sql-asm.js";
 import { demoInspection, demoSnapshot } from "./data";
 import type {
   AppConfig,
@@ -80,9 +80,7 @@ export async function inspectBrowserSaveFile(file: File): Promise<{
     throw new Error("Selected file does not appear to be a SQLite database.");
   }
 
-  const SQL = await initSqlJs({
-    locateFile: (name) => `${import.meta.env.BASE_URL}${name}`,
-  });
+  const SQL = await initSqlJs();
   const database = new SQL.Database(bytes);
 
   try {

@@ -17,3 +17,7 @@ declare module "sql.js" {
 
   export default function initSqlJs(config?: SqlJsConfig): Promise<SqlJsStatic>;
 }
+
+declare module "sql.js/dist/sql-asm.js" {
+  export { default } from "sql.js";
+}
