@@ -6,6 +6,9 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig({
   plugins: [react()],
   base: "./",
+  build: {
+    target: "safari13",
+  },
   clearScreen: false,
   server: {
     host: host || false,
