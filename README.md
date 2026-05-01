@@ -73,11 +73,30 @@ Build the web UI:
 npm run build
 ```
 
+## Browser Mode
+
+The project also builds as a browser app for Steam Deck Gaming Mode. Browser mode cannot scan Steam folders automatically, but it can read a save file selected by the user with the file picker. SQLite inspection runs locally in the browser through `sql.js`; the save is not uploaded to a server.
+
+The GitHub Pages workflow publishes the browser build from `dist/`.
+
+In browser mode:
+
+- open the app URL in the Deck browser
+- choose the PWS save file manually
+- inspect tables and mapping locally
+- use the dashboard/planning screens alongside PWS
+
+Automatic save discovery and snapshot copying remain desktop/Tauri features.
+
 Run the Tauri app on a machine with Rust installed:
 
 ```bash
 npm run tauri dev
 ```
+
+## Steam Deck Blank Window Note
+
+The Tauri backend sets WebKitGTK environment flags before startup to avoid a known Steam Deck desktop-mode failure mode where the app window opens but stays plain white.
 
 ## Notes
 

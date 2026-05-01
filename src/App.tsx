@@ -1,9 +1,9 @@
 import {
   AlertCircle,
-  ArrowDownUp,
   CheckCircle2,
   Database,
   FileDown,
+  FileUp,
   FolderSearch,
   HardDriveDownload,
   Info,
@@ -26,7 +26,9 @@ import {
   createSnapshot,
   formatBytes,
   formatDate,
+  inspectBrowserSaveFile,
   inspectSqliteDatabase,
+  isTauri,
   readAppConfig,
   saveAppConfig,
   scanPwsSaves,
@@ -160,6 +162,27 @@ export function App() {
     }
   }
 
+  async function handleBrowserFile(file: File) {
+    setError(null);
+    setStatus("Reading selected PWS save locally in the browser...");
+    try {
+      const imported = await inspectBrowserSaveFile(file);
+      setSaves((current) => [
+        imported.save,
+        ...current.filter((save) => save.fullPath !== imported.save.fullPath),
+      ]);
+      setSelectedSave(imported.save.fullPath);
+      setSnapshots((current) => [imported.snapshot, ...current]);
+      setInspection(imported.inspection);
+      await persistConfig({ ...config, selectedSavePath: imported.save.fullPath });
+      setStatus("Browser import complete. The save stayed local on this device.");
+      setActiveTab("dashboard");
+    } catch (reason) {
+      setError(String(reason));
+      setStatus("Browser import failed.");
+    }
+  }
+
   async function handlePromotionChange(value: string) {
     await persistConfig({ ...config, selectedPromotion: value });
   }
@@ -246,6 +269,7 @@ export function App() {
                 setSelectedSave={setSelectedSave}
                 onScan={handleScan}
                 onBrowse={handleBrowse}
+                onBrowserFile={handleBrowserFile}
                 onRefresh={handleRefresh}
                 status={status}
                 inspection={inspection}
@@ -328,6 +352,7 @@ function SaveImport(props: {
   setSelectedSave: (path: string) => void;
   onScan: () => void;
   onBrowse: () => void;
+  onBrowserFile: (file: File) => void;
   onRefresh: () => void;
   status: string;
   inspection: DatabaseInspection | null;
@@ -348,13 +373,34 @@ function SaveImport(props: {
           <div>
             <h3 className="text-xl font-semibold tracking-normal">Import PWS Save</h3>
             <p className="mt-1 max-w-3xl text-slate-400">
-              The selected save is copied into the app snapshot folder before analysis. Save and close PWS before refreshing the audit.
+              Desktop mode can scan and snapshot saves automatically. Browser mode reads a save you choose locally on this device and does not upload it.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
-            <BigButton icon={FolderSearch} label="Find PWS Saves Automatically" onClick={props.onScan} />
-            <BigButton icon={HardDriveDownload} label="Manual Browse" onClick={props.onBrowse} variant="secondary" />
-            <BigButton icon={RefreshCcw} label="Refresh Save" onClick={props.onRefresh} variant="accent" />
+            {isTauri() ? (
+              <>
+                <BigButton icon={FolderSearch} label="Find PWS Saves Automatically" onClick={props.onScan} />
+                <BigButton icon={HardDriveDownload} label="Manual Browse" onClick={props.onBrowse} variant="secondary" />
+                <BigButton icon={RefreshCcw} label="Refresh Save" onClick={props.onRefresh} variant="accent" />
+              </>
+            ) : (
+              <label className="flex h-12 cursor-pointer items-center gap-2 rounded-md bg-roh-gold px-4 text-base font-semibold text-deck-950 transition hover:bg-[#e5c77f]">
+                <FileUp size={21} />
+                <span>Choose PWS Save File</span>
+                <input
+                  type="file"
+                  accept=".db,.sqlite,.save,application/octet-stream"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      props.onBrowserFile(file);
+                    }
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+            )}
           </div>
         </div>
         <div className="mt-4 rounded-md border border-roh-cyan/25 bg-roh-cyan/10 p-4 text-sm text-cyan-100">
@@ -370,7 +416,7 @@ function SaveImport(props: {
           <h3 className="mb-4 text-lg font-semibold tracking-normal">Detected Saves</h3>
           <div className="space-y-3">
             {props.saves.length === 0 ? (
-              <EmptyState text="No save files detected yet. Run automatic detection or use Manual Browse." />
+              <EmptyState text={isTauri() ? "No save files detected yet. Run automatic detection or use Manual Browse." : "Choose a PWS save file from the browser. The file is read locally and is not uploaded."} />
             ) : (
               props.saves.map((save) => (
                 <button
