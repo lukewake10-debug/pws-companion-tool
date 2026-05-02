@@ -804,11 +804,22 @@ function WeeklyPriorities({ analysis }: { analysis: SaveAnalysis }) {
 }
 
 type SortDirection = "asc" | "desc";
+type RosterSortKey =
+  | "name"
+  | "push"
+  | "disposition"
+  | "popularity"
+  | "momentum"
+  | "morale"
+  | "fatigue"
+  | "lastBooked"
+  | "recentMatchRatingAverage"
+  | "recentSegmentRatingAverage";
 
 function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
   const [search, setSearch] = useState("");
   const [pushFilter, setPushFilter] = useState("All");
-  const [sort, setSort] = useState<{ key: keyof WorkerProfile; direction: SortDirection }>({ key: "name", direction: "asc" });
+  const [sort, setSort] = useState<{ key: RosterSortKey; direction: SortDirection }>({ key: "name", direction: "asc" });
   const pushOptions = ["All", ...new Set(workers.map((worker) => worker.push).filter(Boolean).sort())];
   const filteredWorkers = workers
     .filter((worker) => {
@@ -818,9 +829,9 @@ function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
       const matchesPush = pushFilter === "All" || worker.push === pushFilter;
       return matchesSearch && matchesWomen && matchesPush;
     })
-    .sort((a, b) => compareValues(a[sort.key], b[sort.key], sort.direction));
+    .sort((a, b) => compareRosterWorkers(a, b, sort.key, sort.direction));
 
-  function changeSort(key: keyof WorkerProfile) {
+  function changeSort(key: RosterSortKey) {
     setSort((current) => ({
       key,
       direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
@@ -1483,6 +1494,34 @@ function compareValues(left: unknown, right: unknown, direction: SortDirection):
     return (((Number(left) || 0) - (Number(right) || 0)) * modifier);
   }
   return String(left ?? "").localeCompare(String(right ?? "")) * modifier;
+}
+
+function compareRosterWorkers(
+  left: WorkerProfile,
+  right: WorkerProfile,
+  key: RosterSortKey,
+  direction: SortDirection,
+): number {
+  const modifier = direction === "asc" ? 1 : -1;
+  const leftValue = rosterSortValue(left, key);
+  const rightValue = rosterSortValue(right, key);
+  const primary =
+    typeof leftValue === "number" && typeof rightValue === "number"
+      ? leftValue - rightValue
+      : String(leftValue).localeCompare(String(rightValue), undefined, { sensitivity: "base" });
+  if (primary !== 0) return primary * modifier;
+  return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+}
+
+function rosterSortValue(worker: WorkerProfile, key: RosterSortKey): string | number {
+  if (key === "lastBooked") {
+    const parsed = Date.parse(worker.lastBooked);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (key === "recentMatchRatingAverage" || key === "recentSegmentRatingAverage") {
+    return worker[key] ?? -1;
+  }
+  return worker[key] ?? "";
 }
 
 function severityValue(severity: "Low" | "Medium" | "High" | "Critical"): number {

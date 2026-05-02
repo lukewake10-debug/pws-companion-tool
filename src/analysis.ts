@@ -245,10 +245,20 @@ function extractPwsWorkers(
   const brands = new Map((getTable(inspection, "brands")?.sampleRows || []).map((row) => [String(row.brandID), String(row.brandName || "")]));
   const workerById = new Map(workers.map((row) => [String(row.workerID), row]));
 
-  return contracts
+  const activeContractsByWorker = new Map<string, Record<string, unknown>>();
+  contracts
     .filter((contract) => String(contract.promotionID) === String(promotionId))
     .filter((contract) => Number(contract.finalised) === 1 && Number(contract.expired) === 0 && Number(contract.suspended) === 0)
     .filter((contract) => !/announcer|referee|staff|personality/i.test(String(contract.push || "")))
+    .forEach((contract) => {
+      const workerId = String(contract.workerID || "");
+      const current = activeContractsByWorker.get(workerId);
+      if (!current || Number(contract.contractID || 0) > Number(current.contractID || 0)) {
+        activeContractsByWorker.set(workerId, contract);
+      }
+    });
+
+  return [...activeContractsByWorker.values()]
     .map((contract) => {
       const worker = workerById.get(String(contract.workerID)) || {};
       const name = String(worker.name || contract.contractName || `Worker ${contract.workerID}`);
