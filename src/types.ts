@@ -106,8 +106,19 @@ export interface WorkerProfile {
   contractStatus: string;
   currentTitles: string[];
   recentRecord: string;
+  recentWins?: number;
+  recentLosses?: number;
+  recentOpponents?: string[];
+  recentMatchCount?: number;
+  recentSegmentCount?: number;
   recentMatchRatingAverage: number | null;
+  last5MatchAverage?: number | null;
+  last10MatchAverage?: number | null;
   recentSegmentRatingAverage: number | null;
+  last5SegmentAverage?: number | null;
+  last10SegmentAverage?: number | null;
+  bestRecentMatch?: string | null;
+  worstRecentMatch?: string | null;
   lastBooked: string;
   warnings: string[];
   creativeNotes: CreativeNotes;
@@ -166,6 +177,27 @@ export interface PushMismatchResult {
   suggestedAction: string;
 }
 
+export interface CompanyCandidate {
+  name: string;
+  confidence: number;
+  activeRosterCount: number;
+  recentEventsCount: number;
+  titlesCount: number;
+  reasons: string[];
+}
+
+export interface ImportSummary {
+  detectedCompany: string;
+  confidence: number;
+  confidenceLevel: "High" | "Medium" | "Low";
+  activeRosterCount: number;
+  titlesFound: number;
+  recentEventsFound: number;
+  matchesFound: number;
+  segmentsFound: number;
+  unmappedFields: string[];
+}
+
 export interface SaveAnalysis {
   workers: WorkerProfile[];
   titles: TitleRecord[];
@@ -175,6 +207,8 @@ export interface SaveAnalysis {
   weeklyPriorities: WeeklyPriority[];
   pushMismatch: PushMismatchResult[];
   promotions: string[];
+  companyCandidates: CompanyCandidate[];
+  importSummary: ImportSummary;
   tableSummary: Array<{
     name: string;
     rowCount: number;

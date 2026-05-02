@@ -1,7 +1,9 @@
 import { emptyCreativeNotes } from "./data";
 import type {
   DatabaseInspection,
+  CompanyCandidate,
   Diagnostic,
+  ImportSummary,
   MappingProfile,
   MatchRecord,
   PushMismatchResult,
@@ -29,14 +31,29 @@ export function buildSaveAnalysis(
   const companyLookup = buildEntityLookup(inspection, ["company", "promotion", "fed"]);
   const workerLookup = buildEntityLookup(inspection, ["worker", "wrestler", "talent", "person"]);
   const promotions = derivePromotions(inspection, companyLookup);
-  const workers = extractWorkers(inspection, selectedPromotion, ignoredWorkers, companyLookup, mappingProfile);
-  const titles = extractTitles(inspection, selectedPromotion, companyLookup, workerLookup, mappingProfile);
-  const matches = extractMatches(inspection, workerLookup, mappingProfile);
-  const segments = extractSegments(inspection, workerLookup, mappingProfile);
+  const companyCandidates = buildCompanyCandidates(inspection, promotions);
+  const pwsSchema = isPwsSchema(inspection);
+  const selectedCompany = pwsSchema
+    ? resolvePwsSelectedCompany(inspection, selectedPromotion)
+    : { id: selectedPromotion, name: selectedPromotion };
+  const workers = pwsSchema
+    ? extractPwsWorkers(inspection, selectedCompany.id, selectedCompany.name, ignoredWorkers)
+    : extractWorkers(inspection, selectedPromotion, ignoredWorkers, companyLookup, mappingProfile);
+  const titles = pwsSchema
+    ? extractPwsTitles(inspection, selectedCompany.id)
+    : extractTitles(inspection, selectedPromotion, companyLookup, workerLookup, mappingProfile);
+  const matches = pwsSchema
+    ? filterRecordsToRoster(extractPwsMatches(inspection, selectedCompany.id), workers)
+    : filterRecordsToRoster(extractMatches(inspection, workerLookup, mappingProfile), workers);
+  const segments = pwsSchema
+    ? filterRecordsToRoster(extractPwsSegments(inspection, selectedCompany.id), workers)
+    : filterRecordsToRoster(extractSegments(inspection, workerLookup, mappingProfile), workers);
   const enrichedWorkers = enrichWorkers(workers, matches, segments, titles);
   const pushMismatch = buildPushMismatch(enrichedWorkers);
   const diagnostics = buildDiagnostics(enrichedWorkers, titles, matches, segments, pushMismatch);
   const weeklyPriorities = buildWeeklyPriorities(diagnostics);
+  const unmapped = buildUnmappedList(inspection, workers, matches, segments, titles);
+  const importSummary = buildImportSummary(selectedCompany.name, companyCandidates, enrichedWorkers, titles, matches, segments, unmapped);
 
   return {
     workers: enrichedWorkers,
@@ -47,12 +64,14 @@ export function buildSaveAnalysis(
     weeklyPriorities,
     pushMismatch,
     promotions,
+    companyCandidates,
+    importSummary,
     tableSummary: inspection.tables.map((table) => ({
       name: table.name,
       rowCount: table.rowCount ?? table.sampleRows.length,
       columns: table.columns.map((column) => column.name),
     })),
-    unmapped: buildUnmappedList(inspection, workers, matches, segments, titles),
+    unmapped,
   };
 }
 
@@ -66,6 +85,18 @@ function emptyAnalysis(): SaveAnalysis {
     weeklyPriorities: [],
     pushMismatch: [],
     promotions: ["ROH", "Custom company"],
+    companyCandidates: [],
+    importSummary: {
+      detectedCompany: "Not detected",
+      confidence: 0,
+      confidenceLevel: "Low",
+      activeRosterCount: 0,
+      titlesFound: 0,
+      recentEventsFound: 0,
+      matchesFound: 0,
+      segmentsFound: 0,
+      unmappedFields: ["Import a PWS save file to inspect database tables."],
+    },
     tableSummary: [],
     unmapped: ["Import a PWS save file to inspect database tables."],
   };
@@ -78,14 +109,20 @@ function extractWorkers(
   companyLookup: Record<string, string>,
   mappingProfile?: MappingProfile,
 ): WorkerProfile[] {
-  const table = findMappedTable(inspection, mappingProfile, "Worker Name") || findBestTable(inspection.tables, {
-    table: ["worker", "wrestler", "talent", "person", "people", "employee", "staff"],
-    columns: ["name", "push", "popularity", "overness", "momentum", "morale", "fatigue", "disposition"],
-  });
+  const table = findMappedTable(inspection, mappingProfile, "Worker Name") || findWorkerTable(inspection);
   if (!table) return [];
 
+  const selectedCompanyIds = findSelectedCompanyIds(inspection, selectedPromotion);
+  const workerLinks = findCompanyWorkerLinks(inspection, table, selectedCompanyIds, selectedPromotion);
+  const linkedWorkerIds = new Set([...workerLinks.keys()]);
+
   const workers = table.sampleRows
-    .map((row, index) => {
+    .map((baseRow, index) => {
+      const id = pickString(baseRow, ["id", "worker_id", "workerid", "wrestler_id", "wrestlerid", "person_id", "personid", "uid"]) || slug(`worker-${index}`);
+      if (linkedWorkerIds.size && !linkedWorkerIds.has(normalize(id))) return null;
+
+      const linkedRow = workerLinks.get(normalize(id));
+      const row = linkedRow ? { ...baseRow, ...linkedRow } : baseRow;
       const first = pickString(row, ["first_name", "firstname", "first"]);
       const last = pickString(row, ["last_name", "lastname", "last"]);
       const name =
@@ -117,9 +154,8 @@ function extractWorkers(
           "promotionid",
           "fed_id",
           "contract_company",
-        ]) || selectedPromotion;
-      const company = resolveLookup(companyLookup, rawCompany);
-      const id = pickString(row, ["id", "worker_id", "workerid", "uid"]) || slug(`${name}-${index}`);
+        ]) || (linkedRow ? selectedPromotion : selectedPromotion);
+      const company = linkedRow ? selectedPromotion : resolveLookup(companyLookup, rawCompany);
 
       const worker: WorkerProfile = {
         id: slug(`${id}-${name}`),
@@ -139,11 +175,22 @@ function extractWorkers(
         morale: pickMappedNumber(row, table, mappingProfile, "Morale", ["morale", "happiness"]) ?? 0,
         fatigue: pickMappedNumber(row, table, mappingProfile, "Fatigue", ["fatigue", "tiredness", "condition"]) ?? 0,
         injuryStatus: pickMappedString(row, table, mappingProfile, "Injury Status", ["injury_status", "injurystatus", "injury", "injured", "health_status"]) || unknown,
-        contractStatus: pickMappedString(row, table, mappingProfile, "Contract Status", ["contract_status", "contractstatus", "contract", "contract_type"]) || unknown,
+        contractStatus: pickMappedString(row, table, mappingProfile, "Contract Status", ["contract_status", "contractstatus", "contract", "contract_type", "status"]) || unknown,
         currentTitles: [],
         recentRecord: unknown,
+        recentWins: 0,
+        recentLosses: 0,
+        recentOpponents: [],
+        recentMatchCount: 0,
+        recentSegmentCount: 0,
         recentMatchRatingAverage: null,
+        last5MatchAverage: null,
+        last10MatchAverage: null,
         recentSegmentRatingAverage: null,
+        last5SegmentAverage: null,
+        last10SegmentAverage: null,
+        bestRecentMatch: null,
+        worstRecentMatch: null,
         lastBooked: unknown,
         warnings: [],
         creativeNotes: { ...emptyCreativeNotes, ignoreFromAudit: ignoredWorkers.includes(slug(`${id}-${name}`)) },
@@ -155,12 +202,443 @@ function extractWorkers(
 
   const selected = workers.filter(
     (worker) =>
-      normalize(worker.company) === normalize(selectedPromotion) ||
-      normalize(worker.brandOrShow) === normalize(selectedPromotion) ||
+      promotionMatches(worker.company, selectedPromotion) ||
+      promotionMatches(worker.brandOrShow, selectedPromotion) ||
       selectedPromotion === "Custom company",
   );
 
   return selected.length ? selected : workers;
+}
+
+function isPwsSchema(inspection: DatabaseInspection): boolean {
+  return ["saveinfo", "promotions", "contracts", "workers", "segments", "opponents", "eventinstance"].every((name) =>
+    Boolean(getTable(inspection, name)),
+  );
+}
+
+function resolvePwsSelectedCompany(inspection: DatabaseInspection, selectedPromotion: string): { id: string; name: string } {
+  const saveinfo = getTable(inspection, "saveinfo")?.sampleRows[0];
+  const promotions = getTable(inspection, "promotions")?.sampleRows || [];
+  const savedPromotionId = saveinfo ? pickString(saveinfo, ["saveUserPromotion"]) : null;
+  const selected =
+    promotions.find((row) => savedPromotionId && String(row.promotionID) === String(savedPromotionId)) ||
+    promotions.find((row) => promotionMatches(String(row.shortName || ""), selectedPromotion) || promotionMatches(String(row.fullName || ""), selectedPromotion)) ||
+    promotions[0];
+  return {
+    id: String(selected?.promotionID || savedPromotionId || selectedPromotion),
+    name: String(selected?.shortName || selected?.fullName || selectedPromotion),
+  };
+}
+
+function extractPwsWorkers(
+  inspection: DatabaseInspection,
+  promotionId: string,
+  companyName: string,
+  ignoredWorkers: string[],
+): WorkerProfile[] {
+  const contracts = getTable(inspection, "contracts")?.sampleRows || [];
+  const workers = getTable(inspection, "workers")?.sampleRows || [];
+  const brands = new Map((getTable(inspection, "brands")?.sampleRows || []).map((row) => [String(row.brandID), String(row.brandName || "")]));
+  const workerById = new Map(workers.map((row) => [String(row.workerID), row]));
+
+  return contracts
+    .filter((contract) => String(contract.promotionID) === String(promotionId))
+    .filter((contract) => Number(contract.finalised) === 1 && Number(contract.expired) === 0 && Number(contract.suspended) === 0)
+    .filter((contract) => !/announcer|referee|staff|personality/i.test(String(contract.push || "")))
+    .map((contract) => {
+      const worker = workerById.get(String(contract.workerID)) || {};
+      const name = String(worker.name || contract.contractName || `Worker ${contract.workerID}`);
+      const id = String(contract.workerID || contract.contractID || name);
+      return {
+        id: slug(`${id}-${name}`),
+        rawId: id,
+        name,
+        company: companyName,
+        brandOrShow: brands.get(String(contract.brand)) || "",
+        push: String(contract.push || unknown),
+        disposition: String(contract.role || unknown),
+        popularity: Math.round(pickNumber(worker, ["northAmericaPop", "starPower", "popularity"]) ?? 0),
+        momentum: Math.round(pickNumber(contract, ["momentum"]) ?? 0),
+        morale: Math.round(pickNumber(contract, ["morale"]) ?? 0),
+        fatigue: Math.round(pickNumber(worker, ["fatigue"]) ?? 0),
+        injuryStatus: String(worker.injuryType || worker.status || unknown),
+        contractStatus: String(contract.contractType || unknown),
+        currentTitles: [],
+        recentRecord: unknown,
+        recentWins: 0,
+        recentLosses: 0,
+        recentOpponents: [],
+        recentMatchCount: 0,
+        recentSegmentCount: 0,
+        recentMatchRatingAverage: null,
+        last5MatchAverage: null,
+        last10MatchAverage: null,
+        recentSegmentRatingAverage: null,
+        last5SegmentAverage: null,
+        last10SegmentAverage: null,
+        bestRecentMatch: null,
+        worstRecentMatch: null,
+        lastBooked: String(contract.lastAppearance || unknown),
+        warnings: [],
+        creativeNotes: { ...emptyCreativeNotes, ignoreFromAudit: ignoredWorkers.includes(slug(`${id}-${name}`)) },
+      };
+    });
+}
+
+function extractPwsTitles(inspection: DatabaseInspection, promotionId: string): TitleRecord[] {
+  const titles = getTable(inspection, "titles")?.sampleRows || [];
+  const workers = new Map((getTable(inspection, "workers")?.sampleRows || []).map((row) => [String(row.workerID), String(row.name || "")]));
+
+  return titles
+    .filter((title) => String(title.promotionID) === String(promotionId) && Number(title.inactive) === 0)
+    .map((title) => {
+      const championIds = [title.currentChampion, title.currentChampion2, title.currentChampion3]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      const champions = championIds.map((id) => workers.get(id) || id).filter(Boolean);
+      const won = String(title.won || unknown);
+      return {
+        id: String(title.titleID || title.name),
+        name: String(title.name || unknown),
+        company: String(promotionId),
+        champion: champions.join(", ") || unknown,
+        lastDefenceDate: won,
+        daysSinceLastDefence: daysSince(won),
+        recentDefences: Number(title.defences || 0),
+        recentChallengers: [],
+        warningStatus: titleSeverity(won),
+      };
+    });
+}
+
+function extractPwsMatches(inspection: DatabaseInspection, promotionId: string): MatchRecord[] {
+  return extractPwsRecords(inspection, promotionId, "Match") as MatchRecord[];
+}
+
+function extractPwsSegments(inspection: DatabaseInspection, promotionId: string): SegmentRecord[] {
+  return extractPwsRecords(inspection, promotionId, "Angle") as SegmentRecord[];
+}
+
+function extractPwsRecords(
+  inspection: DatabaseInspection,
+  promotionId: string,
+  segmentType: "Match" | "Angle",
+): Array<MatchRecord | SegmentRecord> {
+  const segments = getTable(inspection, "segments")?.sampleRows || [];
+  const opponents = getTable(inspection, "opponents")?.sampleRows || [];
+  const workers = new Map((getTable(inspection, "workers")?.sampleRows || []).map((row) => [String(row.workerID), String(row.name || "")]));
+  const eventInstances = getTable(inspection, "eventinstance")?.sampleRows || [];
+  const events = getTable(inspection, "events")?.sampleRows || [];
+  const eventById = new Map(events.map((event) => [String(event.eventID), event]));
+  const instanceById = new Map(
+    eventInstances
+      .filter((instance) => {
+        const event = eventById.get(String(instance.eventID));
+        return event && String(event.promotionID) === String(promotionId) && Number(instance.complete) === 1;
+      })
+      .map((instance) => [String(instance.instanceID), instance]),
+  );
+  const opponentsBySegment = groupRows(opponents, "segmentID");
+
+  const records = segments
+    .filter((segment) => String(segment.segmentType).toLowerCase() === segmentType.toLowerCase())
+    .filter((segment) => instanceById.has(String(segment.showID)))
+    .map((segment, index) => {
+      const instance = instanceById.get(String(segment.showID));
+      const event = instance ? eventById.get(String(instance.eventID)) : null;
+      const participantRows = opponentsBySegment.get(String(segment.segmentID)) || [];
+      const participants = unique(participantRows.map((row) => workers.get(String(row.workerID)) || String(row.workerName || "")).filter(Boolean));
+      const winner = workers.get(String(segment.winnerWorkerID)) || workers.get(String(segment.winner)) || String(segment.winnerName || "");
+      const losers = unique(participantRows.filter((row) => winner && (workers.get(String(row.workerID)) || "") !== winner).map((row) => workers.get(String(row.workerID)) || "").filter(Boolean));
+      const common = {
+        id: String(segment.segmentID || `${segmentType}-${index}`),
+        eventName: String(instance?.customName || event?.eventName || unknown),
+        eventDate: String(instance?.airDate || unknown),
+        participants,
+        rating: pickNumber(segment, ["rating"]),
+        showRating: pickNumber(instance || {}, ["score", "rawScore"]),
+        length: String(segment.segmentLength || unknown),
+      };
+
+      if (segmentType === "Match") {
+        return {
+          ...common,
+          showType: String(event?.importance || unknown),
+          matchOrder: pickNumber(segment, ["segmentorder"]),
+          matchType: String(segment.gimmick || segment.matchStoryID || segment.winType || unknown),
+          winner: winner || unknown,
+          loser: losers.join(", ") || unknown,
+          titleInvolved: "",
+        } satisfies MatchRecord;
+      }
+
+      return {
+        ...common,
+        segmentOrder: pickNumber(segment, ["segmentorder"]),
+        segmentType: String(segment.angleType || segment.purpose || "Angle"),
+        storyline: String(segment.matchStoryID || ""),
+        titleInvolved: String(segment.angleTitleChange || ""),
+      } satisfies SegmentRecord;
+    });
+
+  return records;
+}
+
+function findWorkerTable(inspection: DatabaseInspection): TableInfo | null {
+  return findBestTable(inspection.tables, {
+    table: ["worker", "wrestler", "talent", "person", "people", "employee", "staff"],
+    columns: ["name", "push", "popularity", "overness", "momentum", "morale", "fatigue", "disposition"],
+  });
+}
+
+function buildCompanyCandidates(inspection: DatabaseInspection, promotions: string[]): CompanyCandidate[] {
+  // PWS saves can vary by version/mod, so company detection blends filename,
+  // company rows, roster/contract links, titles and event ownership instead of
+  // relying on one hardcoded ROH table name.
+  const filename = inspection.path.split(/[\\/]/).pop() || inspection.path;
+  const workerTable = findWorkerTable(inspection);
+  const titleTable = findBestTable(inspection.tables, {
+    table: ["title", "championship", "belt"],
+    columns: ["company", "promotion", "holder", "champion"],
+  });
+  const eventTable = findBestTable(inspection.tables, {
+    table: ["event", "show", "card"],
+    columns: ["company", "promotion", "date", "rating"],
+  });
+  const savedCompany = isPwsSchema(inspection) ? resolvePwsSelectedCompany(inspection, "") : null;
+
+  return promotions
+    .filter((promotion) => promotion !== "Custom company")
+    .map((promotion) => {
+      const reasons: string[] = [];
+      let score = 0;
+      const companyIds = findSelectedCompanyIds(inspection, promotion);
+      const isSavedCompany = savedCompany && promotionMatches(savedCompany.name, promotion);
+
+      if (isSavedCompany) {
+        score += 50;
+        reasons.push("saveinfo marks this as the user-booked promotion");
+      }
+
+      if (promotionMatches(filename, promotion)) {
+        score += 30;
+        reasons.push(`filename contains ${promotion}`);
+      }
+      if (companyIds.size > 1) {
+        score += 20;
+        reasons.push("company table contains a matching promotion record");
+      }
+
+      const activeRosterCount =
+        isPwsSchema(inspection) && savedCompany && isSavedCompany
+          ? countPwsActiveWrestlers(inspection, savedCompany.id)
+          : workerTable
+            ? findCompanyWorkerLinks(inspection, workerTable, companyIds, promotion).size
+            : 0;
+      if (activeRosterCount > 0) {
+        score += Math.min(30, 10 + Math.floor(activeRosterCount / 4));
+        reasons.push(`${activeRosterCount} active workers linked`);
+      }
+
+      const titlesCount = isPwsSchema(inspection) && savedCompany && isSavedCompany
+        ? (getTable(inspection, "titles")?.sampleRows || []).filter((title) => String(title.promotionID) === String(savedCompany.id) && Number(title.inactive) === 0).length
+        : titleTable
+        ? titleTable.sampleRows.filter((row) => {
+            const raw = pickString(row, ["company", "promotion", "company_id", "promotion_id", "fed"]) || "";
+            return promotionMatches(raw, promotion) || companyIds.has(normalize(raw));
+          }).length
+        : 0;
+      if (titlesCount > 0) {
+        score += Math.min(12, titlesCount * 2);
+        reasons.push(`${titlesCount} titles linked`);
+      }
+
+      const recentEventsCount = isPwsSchema(inspection) && savedCompany && isSavedCompany
+        ? countPwsRecentEvents(inspection, savedCompany.id)
+        : eventTable
+        ? eventTable.sampleRows.filter((row) => {
+            const raw = pickString(row, ["company", "promotion", "company_id", "promotion_id", "company_name", "promotion_name", "fed"]) || "";
+            return promotionMatches(raw, promotion) || companyIds.has(normalize(raw));
+          }).length
+        : 0;
+      if (recentEventsCount > 0) {
+        score += Math.min(18, recentEventsCount * 2);
+        reasons.push(`${recentEventsCount} recent events found`);
+      }
+
+      if (!reasons.length) reasons.push("detected from database company values");
+
+      return {
+        name: promotion,
+        confidence: Math.min(99, score),
+        activeRosterCount,
+        recentEventsCount,
+        titlesCount,
+        reasons,
+      };
+    })
+    .sort((a, b) => b.confidence - a.confidence || b.activeRosterCount - a.activeRosterCount || b.recentEventsCount - a.recentEventsCount);
+}
+
+function buildImportSummary(
+  selectedPromotion: string,
+  companyCandidates: CompanyCandidate[],
+  workers: WorkerProfile[],
+  titles: TitleRecord[],
+  matches: MatchRecord[],
+  segments: SegmentRecord[],
+  unmapped: string[],
+): ImportSummary {
+  const selectedCandidate =
+    companyCandidates.find((candidate) => promotionMatches(candidate.name, selectedPromotion)) ||
+    companyCandidates[0];
+  const confidence = selectedCandidate?.confidence ?? (workers.length ? 55 : 0);
+  return {
+    detectedCompany: selectedCandidate?.name || selectedPromotion || "Not detected",
+    confidence,
+    confidenceLevel: confidence >= 80 ? "High" : confidence >= 50 ? "Medium" : "Low",
+    activeRosterCount: workers.length,
+    titlesFound: titles.length,
+    recentEventsFound: countUniqueEvents(matches, segments),
+    matchesFound: matches.length,
+    segmentsFound: segments.length,
+    unmappedFields: unmapped,
+  };
+}
+
+function countPwsActiveWrestlers(inspection: DatabaseInspection, promotionId: string): number {
+  return (getTable(inspection, "contracts")?.sampleRows || []).filter(
+    (contract) =>
+      String(contract.promotionID) === String(promotionId) &&
+      Number(contract.finalised) === 1 &&
+      Number(contract.expired) === 0 &&
+      Number(contract.suspended) === 0 &&
+      !/announcer|referee|staff|personality/i.test(String(contract.push || "")),
+  ).length;
+}
+
+function countPwsRecentEvents(inspection: DatabaseInspection, promotionId: string): number {
+  const events = new Map((getTable(inspection, "events")?.sampleRows || []).map((event) => [String(event.eventID), event]));
+  return (getTable(inspection, "eventinstance")?.sampleRows || []).filter((instance) => {
+    const event = events.get(String(instance.eventID));
+    return event && String(event.promotionID) === String(promotionId) && Number(instance.complete) === 1;
+  }).length;
+}
+
+function countUniqueEvents(matches: MatchRecord[], segments: SegmentRecord[]): number {
+  const events = new Set(
+    [...matches.map((match) => `${match.eventName}-${match.eventDate}`), ...segments.map((segment) => `${segment.eventName}-${segment.eventDate}`)]
+      .filter((value) => value && !value.includes(unknown)),
+  );
+  return events.size;
+}
+
+function findSelectedCompanyIds(inspection: DatabaseInspection, selectedPromotion: string): Set<string> {
+  const ids = new Set<string>();
+  const companyTables = inspection.tables.filter((table) => /company|promotion|fed/i.test(table.name));
+  companyTables.forEach((table) => {
+    table.sampleRows.forEach((row) => {
+      const name = pickString(row, ["name", "company", "promotion", "fed", "company_name", "promotion_name", "short_name", "abbreviation"]);
+      if (!name || !promotionMatches(name, selectedPromotion)) return;
+      ids.add(normalize(name));
+      ["id", "company_id", "companyid", "promotion_id", "promotionid", "fed_id", "fedid", "uid"].forEach((key) => {
+        const id = pickString(row, [key]);
+        if (id) ids.add(normalize(id));
+      });
+    });
+  });
+  ids.add(normalize(selectedPromotion));
+  return ids;
+}
+
+function buildEventLookup(inspection: DatabaseInspection): Map<string, { name: string; date: string }> {
+  const lookup = new Map<string, { name: string; date: string }>();
+  const eventTables = inspection.tables.filter((table) => /event|show|card/i.test(table.name));
+  eventTables.forEach((table) => {
+    table.sampleRows.forEach((row, index) => {
+      const id = pickString(row, ["id", "event_id", "eventid", "show_id", "showid", "card_id", "cardid", "uid"]) || `${table.name}-${index}`;
+      const name = pickString(row, ["name", "event", "event_name", "show", "show_name", "card", "card_name"]) || unknown;
+      const date = pickString(row, ["date", "event_date", "show_date", "datetime", "held_on"]) || unknown;
+      lookup.set(normalize(id), { name, date });
+    });
+  });
+  return lookup;
+}
+
+function buildRecordParticipants(
+  inspection: DatabaseInspection,
+  recordTable: TableInfo,
+  workerLookup: Record<string, string>,
+  kind: "match" | "segment",
+): Map<string, string[]> {
+  const recordIds = new Set(
+    recordTable.sampleRows
+      .map((row) => pickString(row, ["id", `${kind}_id`, `${kind}id`, "angle_id", "angleid", "uid"]))
+      .filter(Boolean)
+      .map((id) => normalize(id || "")),
+  );
+  const result = new Map<string, string[]>();
+
+  inspection.tables.forEach((table) => {
+    const columns = table.columns.map((column) => column.name);
+    const recordColumn =
+      kind === "match"
+        ? bestColumn(columns, ["match_id", "matchid", "bout_id", "boutid", "result_id", "resultid"])
+        : bestColumn(columns, ["segment_id", "segmentid", "angle_id", "angleid", "promo_id", "promoid"]);
+    const workerColumn = bestColumn(columns, ["worker_id", "workerid", "wrestler_id", "wrestlerid", "person_id", "personid", "participant_id", "participantid"]);
+    if (!recordColumn || !workerColumn) return;
+    if (!/participant|worker|wrestler|match|segment|angle|people|person/i.test(table.name)) return;
+
+    table.sampleRows.forEach((row) => {
+      const recordId = normalize(String(row[recordColumn] ?? ""));
+      const workerId = String(row[workerColumn] ?? "");
+      if (!recordIds.has(recordId)) return;
+      const participant = resolveLookup(workerLookup, workerId);
+      if (!participant || participant === workerId) return;
+      result.set(recordId, [...(result.get(recordId) || []), participant]);
+    });
+  });
+
+  return result;
+}
+
+function findCompanyWorkerLinks(
+  inspection: DatabaseInspection,
+  workerTable: TableInfo,
+  selectedCompanyIds: Set<string>,
+  selectedPromotion: string,
+): Map<string, Record<string, unknown>> {
+  // Active roster membership is usually stored outside the worker table.
+  // This scans relationship-style tables for worker/company foreign-key pairs
+  // and merges the matching row back into the worker profile extraction.
+  const workerIds = new Set(
+    workerTable.sampleRows
+      .map((row) => pickString(row, ["id", "worker_id", "workerid", "wrestler_id", "wrestlerid", "person_id", "personid", "uid"]))
+      .filter(Boolean)
+      .map((id) => normalize(id || "")),
+  );
+  const links = new Map<string, Record<string, unknown>>();
+
+  inspection.tables.forEach((table) => {
+    const columns = table.columns.map((column) => column.name);
+    const workerColumn = bestColumn(columns, ["worker_id", "workerid", "wrestler_id", "wrestlerid", "person_id", "personid", "employee_id", "talent_id"]);
+    const companyColumn = bestColumn(columns, ["company_id", "companyid", "promotion_id", "promotionid", "fed_id", "fedid", "company", "promotion", "fed"]);
+    if (!workerColumn || !companyColumn) return;
+
+    const tableLooksUseful = /contract|roster|employment|company|promotion|worker|wrestler|talent/i.test(table.name);
+    if (!tableLooksUseful) return;
+
+    table.sampleRows.forEach((row) => {
+      const workerId = normalize(String(row[workerColumn] ?? ""));
+      const companyId = normalize(String(row[companyColumn] ?? ""));
+      if (!workerIds.has(workerId)) return;
+      if (!selectedCompanyIds.has(companyId) && companyId !== normalize(selectedPromotion)) return;
+      if (isInactiveLink(row)) return;
+      links.set(workerId, row);
+    });
+  });
+
+  return links;
 }
 
 function extractTitles(
@@ -200,7 +678,7 @@ function extractTitles(
         warningStatus: titleSeverity(lastDefenceDate),
       };
     })
-    .filter((title) => normalize(title.company) === normalize(selectedPromotion) || selectedPromotion === "Custom company" || title.company === unknown);
+    .filter((title) => promotionMatches(title.company, selectedPromotion) || selectedPromotion === "Custom company" || title.company === unknown);
 }
 
 function extractMatches(inspection: DatabaseInspection, workerLookup: Record<string, string>, mappingProfile?: MappingProfile): MatchRecord[] {
@@ -210,9 +688,14 @@ function extractMatches(inspection: DatabaseInspection, workerLookup: Record<str
   });
   if (!table) return [];
 
+  const participantsByMatch = buildRecordParticipants(inspection, table, workerLookup, "match");
+  const eventLookup = buildEventLookup(inspection);
+
   return table.sampleRows.map((row, index) => {
+    const recordId = pickString(row, ["id", "match_id", "matchid", "uid"]) || `match-${index}`;
     const participants = splitParticipants(
       pickMappedString(row, table, mappingProfile, "Match Participants", ["participants", "workers", "worker_names", "wrestlers", "competitors"]) ||
+        (participantsByMatch.get(normalize(recordId)) || []).join(", ") ||
         [
           pickString(row, ["worker1", "worker_1", "participant1", "participant_1"]),
           pickString(row, ["worker2", "worker_2", "participant2", "participant_2"]),
@@ -221,13 +704,15 @@ function extractMatches(inspection: DatabaseInspection, workerLookup: Record<str
         ]
           .filter(Boolean)
           .map((value) => resolveLookup(workerLookup, value || ""))
-          .join(", "),
+        .join(", "),
     ).map((value) => resolveLookup(workerLookup, value));
+    const eventId = pickString(row, ["event_id", "eventid", "show_id", "showid", "card_id", "cardid"]);
+    const event = eventId ? eventLookup.get(normalize(eventId)) : null;
 
     return {
-      id: pickString(row, ["id", "match_id", "matchid", "uid"]) || `match-${index}`,
-      eventName: pickMappedString(row, table, mappingProfile, "Event Name", ["event", "event_name", "show", "show_name", "card"]) || unknown,
-      eventDate: pickMappedString(row, table, mappingProfile, "Event Date", ["date", "event_date", "show_date", "datetime"]) || unknown,
+      id: recordId,
+      eventName: pickMappedString(row, table, mappingProfile, "Event Name", ["event", "event_name", "show", "show_name", "card"]) || event?.name || unknown,
+      eventDate: pickMappedString(row, table, mappingProfile, "Event Date", ["date", "event_date", "show_date", "datetime"]) || event?.date || unknown,
       showType: pickMappedString(row, table, mappingProfile, "Show Type", ["show_type", "showtype", "event_type", "type"]) || unknown,
       matchOrder: pickMappedNumber(row, table, mappingProfile, "Match Order", ["match_order", "order", "segment_order", "position"]),
       matchType: pickMappedString(row, table, mappingProfile, "Match Type", ["match_type", "matchtype", "type", "stipulation"]) || unknown,
@@ -249,18 +734,25 @@ function extractSegments(inspection: DatabaseInspection, workerLookup: Record<st
   });
   if (!table) return [];
 
+  const participantsBySegment = buildRecordParticipants(inspection, table, workerLookup, "segment");
+  const eventLookup = buildEventLookup(inspection);
+
   return table.sampleRows.map((row, index) => {
+    const recordId = pickString(row, ["id", "segment_id", "angle_id", "uid"]) || `segment-${index}`;
     const participants = splitParticipants(
       pickMappedString(row, table, mappingProfile, "Segment Participants", ["participants", "workers", "worker_names", "people"]) ||
+        (participantsBySegment.get(normalize(recordId)) || []).join(", ") ||
         [pickString(row, ["worker1", "participant1"]), pickString(row, ["worker2", "participant2"])]
           .filter(Boolean)
           .join(", "),
     ).map((value) => resolveLookup(workerLookup, value));
+    const eventId = pickString(row, ["event_id", "eventid", "show_id", "showid", "card_id", "cardid"]);
+    const event = eventId ? eventLookup.get(normalize(eventId)) : null;
 
     return {
-      id: pickString(row, ["id", "segment_id", "angle_id", "uid"]) || `segment-${index}`,
-      eventName: pickMappedString(row, table, mappingProfile, "Event Name", ["event", "event_name", "show", "show_name"]) || unknown,
-      eventDate: pickMappedString(row, table, mappingProfile, "Event Date", ["date", "event_date", "show_date", "datetime"]) || unknown,
+      id: recordId,
+      eventName: pickMappedString(row, table, mappingProfile, "Event Name", ["event", "event_name", "show", "show_name"]) || event?.name || unknown,
+      eventDate: pickMappedString(row, table, mappingProfile, "Event Date", ["date", "event_date", "show_date", "datetime"]) || event?.date || unknown,
       segmentOrder: pickMappedNumber(row, table, mappingProfile, "Segment Order", ["segment_order", "order", "position"]),
       segmentType: pickMappedString(row, table, mappingProfile, "Segment Type", ["segment_type", "angle_type", "type"]) || unknown,
       participants,
@@ -281,21 +773,44 @@ function enrichWorkers(
 ): WorkerProfile[] {
   return workers.map((worker) => {
     const workerKey = normalize(worker.name);
-    const workerMatches = matches.filter((match) => recordIncludes(match.participants, worker.name) || normalize(match.winner) === workerKey || normalize(match.loser) === workerKey);
-    const workerSegments = segments.filter((segment) => recordIncludes(segment.participants, worker.name));
+    const workerMatches = matches
+      .filter((match) => recordIncludes(match.participants, worker.name) || normalize(match.winner) === workerKey || normalize(match.loser) === workerKey)
+      .sort((a, b) => dateSortValue(b.eventDate) - dateSortValue(a.eventDate));
+    const workerSegments = segments
+      .filter((segment) => recordIncludes(segment.participants, worker.name))
+      .sort((a, b) => dateSortValue(b.eventDate) - dateSortValue(a.eventDate));
     const wins = workerMatches.filter((match) => normalize(match.winner) === workerKey).length;
     const losses = workerMatches.filter((match) => normalize(match.loser) === workerKey).length;
     const matchRatings = workerMatches.map((match) => match.rating).filter(isNumber);
     const segmentRatings = workerSegments.map((segment) => segment.rating).filter(isNumber);
     const currentTitles = titles.filter((title) => normalize(title.champion) === workerKey).map((title) => title.name);
     const warnings = buildWorkerWarnings(worker, wins, losses, matchRatings, segmentRatings);
+    const bestRecentMatch = [...workerMatches]
+      .filter((match) => isNumber(match.rating))
+      .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))[0];
+    const worstRecentMatch = [...workerMatches]
+      .filter((match) => isNumber(match.rating))
+      .sort((a, b) => (a.rating ?? 0) - (b.rating ?? 0))[0];
 
     return {
       ...worker,
       currentTitles,
       recentRecord: workerMatches.length ? `${wins}-${losses}` : unknown,
+      recentWins: wins,
+      recentLosses: losses,
+      recentOpponents: unique(
+        workerMatches.flatMap((match) => match.participants.filter((participant) => normalize(participant) !== workerKey)),
+      ).slice(0, 10),
+      recentMatchCount: workerMatches.length,
+      recentSegmentCount: workerSegments.length,
       recentMatchRatingAverage: averageOrNull(matchRatings.slice(0, 10)),
+      last5MatchAverage: averageOrNull(matchRatings.slice(0, 5)),
+      last10MatchAverage: averageOrNull(matchRatings.slice(0, 10)),
       recentSegmentRatingAverage: averageOrNull(segmentRatings.slice(0, 10)),
+      last5SegmentAverage: averageOrNull(segmentRatings.slice(0, 5)),
+      last10SegmentAverage: averageOrNull(segmentRatings.slice(0, 10)),
+      bestRecentMatch: bestRecentMatch ? `${bestRecentMatch.eventName}: ${bestRecentMatch.rating}` : null,
+      worstRecentMatch: worstRecentMatch ? `${worstRecentMatch.eventName}: ${worstRecentMatch.rating}` : null,
       lastBooked: latestKnownDate([...workerMatches.map((match) => match.eventDate), ...workerSegments.map((segment) => segment.eventDate)]),
       warnings,
     };
@@ -426,6 +941,59 @@ function buildDiagnostics(
       ),
     );
 
+  workers
+    .filter((worker) => worker.morale > 0 && worker.morale <= 35)
+    .slice(0, 5)
+    .forEach((worker) =>
+      add(
+        "Low morale risk.",
+        worker.morale <= 20 ? "Critical" : "High",
+        `${worker.name} morale is ${worker.morale}.`,
+        "Low morale can turn a useful roster member into an availability or contract risk.",
+        "Give the worker a clear creative beat, a win, or a lighter schedule depending on their role.",
+        "Book a decisive TV win or a protected segment that reinforces their direction.",
+      ),
+    );
+
+  workers
+    .filter((worker) => worker.lastBooked === unknown || (daysSince(worker.lastBooked) ?? 0) >= 30)
+    .slice(0, 8)
+    .forEach((worker) =>
+      add(
+        "Worker has not been booked recently.",
+        /main|upper/i.test(worker.push) ? "High" : "Medium",
+        `${worker.name} last booked: ${worker.lastBooked}. Official Push: ${worker.push}.`,
+        "Long gaps can cool momentum, especially for workers expected to matter on the card.",
+        "Either book them soon, add a Creative Plan, or mark Ignore from Audit if they are intentionally inactive.",
+        "Use them in a fresh match, short angle, or contender-building segment on the next show.",
+      ),
+    );
+
+  const mainEventWorkers = workers.filter((worker) => /main/i.test(worker.push));
+  if (mainEventWorkers.length > 0 && mainEventWorkers.length / Math.max(1, workers.length) > 0.18) {
+    add(
+      "Main Event Push group may be overused.",
+      "Medium",
+      `${mainEventWorkers.length} of ${workers.length} active workers have Main Event Push.`,
+      "Too many Main Event workers can make the official card structure feel flat.",
+      "Protect the true top tier and review whether some workers need a rebuild before being presented at that level.",
+      "Give the strongest contenders meaningful wins while cooling directionless Main Event workers away from title focus.",
+    );
+  }
+
+  const faceCount = workers.filter((worker) => /face|baby/i.test(worker.disposition)).length;
+  const heelCount = workers.filter((worker) => /heel/i.test(worker.disposition)).length;
+  if (faceCount && heelCount && Math.max(faceCount, heelCount) / Math.max(1, Math.min(faceCount, heelCount)) >= 1.8) {
+    add(
+      "Disposition balance looks uneven.",
+      "Medium",
+      `${faceCount} face/babyface workers and ${heelCount} heel workers detected.`,
+      "A lopsided alignment split can make fresh programmes harder to book.",
+      "Plan a turn, bring in an opposing act, or rotate matchups to avoid repeating the same pairings.",
+      "Set up a Planned Turn for a midcard act who can help the weaker side of the roster.",
+    );
+  }
+
   pushMismatch
     .filter((item) => item.label !== "Correctly Positioned")
     .slice(0, 6)
@@ -491,6 +1059,13 @@ function buildWeeklyPriorities(diagnostics: Diagnostic[]): WeeklyPriority[] {
   }));
 }
 
+function filterRecordsToRoster<T extends { participants: string[] }>(records: T[], workers: WorkerProfile[]): T[] {
+  if (!workers.length) return records;
+  const rosterNames = new Set(workers.map((worker) => normalize(worker.name)));
+  const filtered = records.filter((record) => record.participants.some((participant) => rosterNames.has(normalize(participant))));
+  return filtered.length ? filtered : records;
+}
+
 function buildUnmappedList(
   inspection: DatabaseInspection,
   workers: WorkerProfile[],
@@ -516,9 +1091,24 @@ function buildEntityLookup(inspection: DatabaseInspection, tableKeywords: string
   table?.sampleRows.forEach((row) => {
     const id = pickString(row, ["id", `${tableKeywords[0]}_id`, `${tableKeywords[0]}id`, "uid"]);
     const name = pickString(row, ["name", `${tableKeywords[0]}_name`, `${tableKeywords[0]}name`, "display_name", "full_name"]);
-    if (id && name) lookup[id] = name;
+    if (id && name) {
+      lookup[id] = name;
+      lookup[normalize(id)] = name;
+    }
   });
   return lookup;
+}
+
+function getTable(inspection: DatabaseInspection, name: string): TableInfo | null {
+  return inspection.tables.find((table) => normalize(table.name) === normalize(name)) || null;
+}
+
+function groupRows(rows: Record<string, unknown>[], key: string): Map<string, Record<string, unknown>[]> {
+  return rows.reduce((result, row) => {
+    const value = String(row[key] ?? "");
+    result.set(value, [...(result.get(value) || []), row]);
+    return result;
+  }, new Map<string, Record<string, unknown>[]>());
 }
 
 function derivePromotions(inspection: DatabaseInspection, companyLookup: Record<string, string>): string[] {
@@ -607,6 +1197,28 @@ function findBestTable(tables: TableInfo[], options: { table: string[]; columns:
   return scored[0]?.table ?? null;
 }
 
+function bestColumn(columns: string[], candidates: string[]): string | null {
+  const normalized = columns.map((column) => ({ original: column, normalized: normalize(column) }));
+  for (const candidate of candidates) {
+    const wanted = normalize(candidate);
+    const exact = normalized.find((column) => column.normalized === wanted);
+    if (exact) return exact.original;
+  }
+  for (const candidate of candidates) {
+    const wanted = normalize(candidate);
+    const fuzzy = normalized.find((column) => column.normalized.includes(wanted) || wanted.includes(column.normalized));
+    if (fuzzy) return fuzzy.original;
+  }
+  return null;
+}
+
+function isInactiveLink(row: Record<string, unknown>): boolean {
+  const status = pickString(row, ["status", "contract_status", "contractstatus", "employment_status", "active", "is_active"]);
+  if (!status) return false;
+  if (/inactive|expired|released|left|fired|retired|false|0/i.test(status)) return true;
+  return false;
+}
+
 function pickString(row: Record<string, unknown>, keys: string[]): string | null {
   const map = lowerCaseKeys(row);
   for (const key of keys) {
@@ -665,10 +1277,19 @@ function latestKnownDate(values: string[]): string {
   return dates[0]?.value || unknown;
 }
 
+function dateSortValue(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function daysSince(value: string): number | null {
   const time = Date.parse(value);
   if (!Number.isFinite(time)) return null;
   return Math.max(0, Math.floor((Date.now() - time) / 86_400_000));
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function titleSeverity(value: string): Severity {
@@ -749,6 +1370,20 @@ function severityRank(severity: Severity): number {
 
 function normalize(value: string): string {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function promotionMatches(value: string, selectedPromotion: string): boolean {
+  const left = normalize(value);
+  const right = normalize(selectedPromotion);
+  if (!left || !right) return false;
+  if (left === right || left.includes(right) || right.includes(left)) return true;
+  if (right === "roh" && left.includes("ringofhonor")) return true;
+  const initials = String(value || "")
+    .split(/\s+/)
+    .map((part) => part[0])
+    .join("")
+    .toLowerCase();
+  return normalize(initials) === right;
 }
 
 function slug(value: string): string {

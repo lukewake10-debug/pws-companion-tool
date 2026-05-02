@@ -12,7 +12,7 @@ import type {
 } from "./types";
 
 const configKey = "pws-save-auditor-config";
-const browserSampleLimit = 2000;
+const browserSampleLimit = 60000;
 
 export const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -191,7 +191,9 @@ function inspectBrowserTables(database: import("sql.js").Database): TableInfo[] 
 
     const rowCountResult = database.exec(`SELECT COUNT(*) AS count FROM ${escapedName}`);
     const rowCount = Number(rowCountResult[0]?.values[0]?.[0] ?? 0);
-    const sampleResult = database.exec(`SELECT * FROM ${escapedName} LIMIT ${browserSampleLimit}`);
+    const primaryKey = columns.find((column) => column.primaryKey)?.name;
+    const orderClause = primaryKey ? ` ORDER BY "${primaryKey.replace(/"/g, '""')}" DESC` : "";
+    const sampleResult = database.exec(`SELECT * FROM ${escapedName}${orderClause} LIMIT ${browserSampleLimit}`);
     const sampleRows =
       sampleResult[0]?.values.map((row) =>
         Object.fromEntries(sampleResult[0].columns.map((column, index) => [column, row[index]])),

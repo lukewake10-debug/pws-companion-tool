@@ -46,6 +46,7 @@ const appConfigFallback: AppConfig = {
   selectedPromotion: null,
   ignoredWorkers: [],
 };
+const mappingProfileStorageKey = "pws-save-auditor-mapping-profile";
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("save-import");
@@ -69,6 +70,10 @@ export function App() {
       .then((loaded) => {
         setConfig(loaded);
         setSelectedSave(loaded.selectedSavePath);
+        const storedMapping = window.localStorage.getItem(mappingProfileStorageKey);
+        if (storedMapping) {
+          setMappingProfile(JSON.parse(storedMapping));
+        }
       })
       .catch((reason) => setError(String(reason)));
   }, []);
@@ -92,8 +97,24 @@ export function App() {
   const rosterWorkers = analysis.workers;
   const activeRoster = rosterWorkers.filter((worker) => includedWorkers[worker.id] !== false);
   const pushGroups = groupBy(activeRoster, (worker) => worker.push || "Unmapped");
-  const promotionOptions = analysis.promotions.length ? analysis.promotions : ["ROH", "Custom company"];
+  const promotionOptions = [...new Set([selectedPromotion, ...(analysis.promotions.length ? analysis.promotions : ["ROH", "Custom company"])])];
   const tableColumnOptions = useMemo(() => buildTableColumnOptions(inspection), [inspection]);
+
+  useEffect(() => {
+    const bestCandidate = analysis.companyCandidates[0];
+    if (!inspection || !bestCandidate || bestCandidate.confidence < 50) {
+      return;
+    }
+    const currentLooksWrong =
+      !config.selectedPromotion ||
+      (bestCandidate.confidence >= 80 &&
+        !promotionMatchesUi(bestCandidate.name, selectedPromotion) &&
+        analysis.importSummary.activeRosterCount === 0);
+    if (!currentLooksWrong) {
+      return;
+    }
+    persistConfig({ ...config, selectedPromotion: bestCandidate.name }).catch((reason) => setError(String(reason)));
+  }, [inspection, analysis.companyCandidates, config]);
 
   async function persistConfig(nextConfig: AppConfig) {
     setConfig(nextConfig);
@@ -197,6 +218,11 @@ export function App() {
     await persistConfig({ ...config, ignoredWorkers });
   }
 
+  function handleMappingProfileChange(profile: MappingProfile) {
+    setMappingProfile(profile);
+    window.localStorage.setItem(mappingProfileStorageKey, JSON.stringify(profile));
+  }
+
   const shellProps = {
     activeTab,
     setActiveTab,
@@ -276,7 +302,8 @@ export function App() {
                 inspection={inspection}
                 tableColumnOptions={tableColumnOptions}
                 mappingProfile={mappingProfile}
-                setMappingProfile={setMappingProfile}
+                setMappingProfile={handleMappingProfileChange}
+                analysis={analysis}
                 promotionOptions={promotionOptions}
                 selectedPromotion={selectedPromotion}
                 onPromotionChange={handlePromotionChange}
@@ -362,6 +389,7 @@ function SaveImport(props: {
   tableColumnOptions: string[];
   mappingProfile: MappingProfile;
   setMappingProfile: (profile: MappingProfile) => void;
+  analysis: SaveAnalysis;
   promotionOptions: string[];
   selectedPromotion: string;
   onPromotionChange: (promotion: string) => void;
@@ -413,6 +441,12 @@ function SaveImport(props: {
           </div>
         </div>
       </section>
+
+      <ImportPreview
+        analysis={props.analysis}
+        selectedPromotion={props.selectedPromotion}
+        onPromotionChange={props.onPromotionChange}
+      />
 
       <section className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="rounded-md border border-white/10 bg-deck-900 p-5">
@@ -636,6 +670,71 @@ function MappingScreen({
   );
 }
 
+function ImportPreview({
+  analysis,
+  selectedPromotion,
+  onPromotionChange,
+}: {
+  analysis: SaveAnalysis;
+  selectedPromotion: string;
+  onPromotionChange: (promotion: string) => void;
+}) {
+  if (!analysis.tableSummary.length) {
+    return null;
+  }
+
+  const summary = analysis.importSummary;
+  const bannerTone = summary.confidenceLevel === "High" ? "border-emerald-400/35 bg-emerald-400/10 text-emerald-100" : summary.confidenceLevel === "Medium" ? "border-roh-gold/35 bg-roh-gold/10 text-amber-100" : "border-roh-red/40 bg-roh-red/10 text-red-100";
+
+  return (
+    <section className={`rounded-md border p-5 ${bannerTone}`}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h3 className="text-xl font-semibold tracking-normal">
+            Detected company: {summary.detectedCompany}
+          </h3>
+          <p className="mt-1 text-sm opacity-90">
+            Imported {summary.activeRosterCount} active workers, {summary.titlesFound} titles, {summary.recentEventsFound} recent events, {summary.matchesFound} matches and {summary.segmentsFound} segments.
+          </p>
+        </div>
+        <StatusPill label={`${summary.confidence}% confidence`} tone={summary.confidenceLevel === "High" ? "good" : summary.confidenceLevel === "Medium" ? "warn" : "bad"} />
+      </div>
+      {analysis.companyCandidates.length ? (
+        <div className="mt-4 grid gap-3 xl:grid-cols-3">
+          {analysis.companyCandidates.slice(0, 6).map((candidate) => (
+            <button
+              key={candidate.name}
+              type="button"
+              onClick={() => onPromotionChange(candidate.name)}
+              className={`rounded-md border p-4 text-left transition ${
+                promotionMatchesUi(candidate.name, selectedPromotion)
+                  ? "border-roh-gold bg-deck-900/70"
+                  : "border-white/10 bg-deck-850/80 hover:border-white/25"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <p className="font-semibold text-slate-100">{candidate.name}</p>
+                <StatusPill label={`${candidate.confidence}%`} tone={candidate.confidence >= 80 ? "good" : candidate.confidence >= 50 ? "warn" : "bad"} />
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-slate-300">
+                <span>{candidate.activeRosterCount} workers</span>
+                <span>{candidate.recentEventsCount} events</span>
+                <span>{candidate.titlesCount} titles</span>
+              </div>
+              <p className="mt-3 text-xs text-slate-400">{candidate.reasons.join("; ")}</p>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {summary.unmappedFields.length ? (
+        <p className="mt-4 text-sm opacity-90">
+          Mapping still needed: {summary.unmappedFields.slice(0, 3).join(" ")}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 function PromotionAndRoster({
   promotionOptions,
   selectedPromotion,
@@ -765,13 +864,23 @@ function PushGroups({ pushGroups }: { pushGroups: Record<string, WorkerProfile[]
       {Object.entries(pushGroups).map(([push, workers]) => {
         const faces = workers.filter((worker) => /face|baby/i.test(worker.disposition)).length;
         const heels = workers.filter((worker) => /heel/i.test(worker.disposition)).length;
+        const wins = workers.reduce((sum, worker) => sum + (worker.recentWins ?? 0), 0);
+        const losses = workers.reduce((sum, worker) => sum + (worker.recentLosses ?? 0), 0);
+        const notBooked = workers.filter((worker) => worker.lastBooked === "Unmapped").length;
         return (
           <section key={push} className="rounded-md border border-white/10 bg-deck-900 p-5">
             <h3 className="text-xl font-semibold tracking-normal">{push}</h3>
-            <div className="mt-4 grid grid-cols-3 gap-3">
+            <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3">
               <MiniMetric label="Workers" value={workers.length} />
               <MiniMetric label="Face / Heel" value={`${faces} / ${heels}`} />
+              <MiniMetric label="Avg Popularity" value={average(workers.map((worker) => worker.popularity))} />
               <MiniMetric label="Avg Momentum" value={average(workers.map((worker) => worker.momentum))} />
+              <MiniMetric label="Avg Morale" value={average(workers.map((worker) => worker.morale))} />
+              <MiniMetric label="Avg Fatigue" value={average(workers.map((worker) => worker.fatigue))} />
+              <MiniMetric label="Match Avg" value={average(workers.map((worker) => worker.recentMatchRatingAverage ?? 0).filter(Boolean)) || "Unmapped"} />
+              <MiniMetric label="Segment Avg" value={average(workers.map((worker) => worker.recentSegmentRatingAverage ?? 0).filter(Boolean)) || "Unmapped"} />
+              <MiniMetric label="Recent W/L" value={`${wins}-${losses}`} />
+              <MiniMetric label="Not Booked" value={notBooked} />
             </div>
             <div className="mt-4 space-y-2">
               {workers.map((worker) => (
@@ -1241,4 +1350,11 @@ function downloadReport(label: string, analysis: SaveAnalysis) {
 
 function splitCamel(value: string): string {
   return value.replace(/([A-Z])/g, " $1").replace(/^./, (first) => first.toUpperCase());
+}
+
+function promotionMatchesUi(value: string, selectedPromotion: string): boolean {
+  const normalize = (input: string) => input.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const left = normalize(value);
+  const right = normalize(selectedPromotion);
+  return left === right || left.includes(right) || right.includes(left);
 }
