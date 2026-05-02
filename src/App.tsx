@@ -862,6 +862,7 @@ function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
           ))}
         </select>
       </div>
+      <OverallLegend />
       <div className="overflow-x-auto">
         <table className="min-w-full text-left text-sm">
           <thead className="bg-deck-850 text-slate-400">
@@ -1419,14 +1420,38 @@ function StatusPill({ label, tone }: { label: string; tone: "good" | "warn" | "b
 
 function OverallBadge({ worker }: { worker: WorkerProfile }) {
   const breakdown = worker.overallBreakdown;
-  const title = `Overall ${worker.overallRating}: Marketability ${breakdown.marketability}, Star Power ${breakdown.starPower}, Popularity ${breakdown.popularity}, Wrestling Ability ${breakdown.wrestlingAbility}, Psychology ${breakdown.psychology}`;
+  const tier = overallTier(worker.overallRating);
+  const title = `${tier.label} Overall ${worker.overallRating}: Marketability ${breakdown.marketability}, Star Power ${breakdown.starPower}, Popularity ${breakdown.popularity}, Wrestling Ability ${breakdown.wrestlingAbility}, Psychology ${breakdown.psychology}`;
   return (
     <span
       title={title}
-      className="inline-flex min-w-10 justify-center rounded-md border border-roh-gold/40 bg-roh-gold/15 px-2 py-0.5 text-xs font-bold text-roh-gold"
+      className={`inline-flex min-w-10 justify-center rounded-md border px-2 py-0.5 text-xs font-bold ${tier.className}`}
     >
       {worker.overallRating || "-"}
     </span>
+  );
+}
+
+function OverallLegend() {
+  const tiers = [
+    { score: 92, range: "90+" },
+    { score: 84, range: "80-89" },
+    { score: 74, range: "70-79" },
+    { score: 64, range: "60-69" },
+    { score: 54, range: "50-59" },
+    { score: 44, range: "1-49" },
+  ];
+  return (
+    <div className="flex flex-wrap gap-2 border-b border-white/10 bg-deck-900 px-4 py-3 text-xs">
+      {tiers.map((tier) => {
+        const config = overallTier(tier.score);
+        return (
+          <span key={tier.range} className={`rounded-md border px-2.5 py-1 font-semibold ${config.className}`}>
+            {tier.range} {config.label}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1603,6 +1628,28 @@ function uiWorkerQuality(worker: WorkerProfile): number {
 
 function severityValue(severity: "Low" | "Medium" | "High" | "Critical"): number {
   return { Low: 1, Medium: 2, High: 3, Critical: 4 }[severity];
+}
+
+function overallTier(score: number): { label: string; className: string } {
+  if (score >= 90) {
+    return { label: "Franchise Ace", className: "border-fuchsia-300/50 bg-fuchsia-400/20 text-fuchsia-50 shadow-[0_0_0_1px_rgba(240,171,252,0.15)]" };
+  }
+  if (score >= 80) {
+    return { label: "Main Event Level", className: "border-roh-gold/50 bg-roh-gold/20 text-amber-50" };
+  }
+  if (score >= 70) {
+    return { label: "Upper Card Level", className: "border-roh-cyan/45 bg-roh-cyan/15 text-cyan-50" };
+  }
+  if (score >= 60) {
+    return { label: "Reliable Roster Piece", className: "border-sky-300/35 bg-sky-400/10 text-sky-100" };
+  }
+  if (score >= 50) {
+    return { label: "Developing Talent", className: "border-amber-400/35 bg-amber-400/10 text-amber-100" };
+  }
+  if (score > 0) {
+    return { label: "Needs Protection", className: "border-rose-400/35 bg-rose-400/10 text-rose-100" };
+  }
+  return { label: "Unmapped", className: "border-slate-500/40 bg-slate-500/10 text-slate-300" };
 }
 
 function pushGroupRank(push: string): number {
