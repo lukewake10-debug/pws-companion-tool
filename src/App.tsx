@@ -94,8 +94,8 @@ export function App() {
     config.ignoredWorkers,
     mappingProfile,
   ]);
-  const rosterWorkers = analysis.workers;
-  const activeRoster = rosterWorkers.filter((worker) => includedWorkers[worker.id] !== false);
+  const rosterWorkers = dedupeWorkers(analysis.workers);
+  const activeRoster = dedupeWorkers(rosterWorkers.filter((worker) => includedWorkers[worker.id] !== false));
   const pushGroups = groupBy(activeRoster, (worker) => worker.push || "Unmapped");
   const promotionOptions = [...new Set([selectedPromotion, ...(analysis.promotions.length ? analysis.promotions : ["ROH", "Custom company"])])];
   const tableColumnOptions = useMemo(() => buildTableColumnOptions(inspection), [inspection]);
@@ -820,8 +820,9 @@ function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
   const [search, setSearch] = useState("");
   const [pushFilter, setPushFilter] = useState("All");
   const [sort, setSort] = useState<{ key: RosterSortKey; direction: SortDirection }>({ key: "name", direction: "asc" });
-  const pushOptions = ["All", ...new Set(workers.map((worker) => worker.push).filter(Boolean).sort())];
-  const filteredWorkers = workers
+  const uniqueWorkers = dedupeWorkers(workers);
+  const pushOptions = ["All", ...new Set(uniqueWorkers.map((worker) => worker.push).filter(Boolean).sort())];
+  const filteredWorkers = uniqueWorkers
     .filter((worker) => {
       const haystack = `${worker.name} ${worker.push} ${worker.disposition} ${worker.injuryStatus} ${worker.currentTitles.join(" ")}`.toLowerCase();
       const matchesSearch = !search || haystack.includes(search.toLowerCase());
@@ -834,7 +835,7 @@ function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
   function changeSort(key: RosterSortKey) {
     setSort((current) => ({
       key,
-      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+      direction: current.key === key ? (current.direction === "asc" ? "desc" : "asc") : defaultRosterSortDirection(key),
     }));
   }
 
@@ -1513,6 +1514,12 @@ function compareRosterWorkers(
   return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
 }
 
+function defaultRosterSortDirection(key: RosterSortKey): SortDirection {
+  return ["popularity", "momentum", "morale", "fatigue", "lastBooked", "recentMatchRatingAverage", "recentSegmentRatingAverage"].includes(key)
+    ? "desc"
+    : "asc";
+}
+
 function rosterSortValue(worker: WorkerProfile, key: RosterSortKey): string | number {
   if (key === "lastBooked") {
     const parsed = Date.parse(worker.lastBooked);
@@ -1522,6 +1529,28 @@ function rosterSortValue(worker: WorkerProfile, key: RosterSortKey): string | nu
     return worker[key] ?? -1;
   }
   return worker[key] ?? "";
+}
+
+function dedupeWorkers(workers: WorkerProfile[]): WorkerProfile[] {
+  const byWorker = new Map<string, WorkerProfile>();
+  workers.forEach((worker) => {
+    const key = worker.rawId ? `id:${worker.rawId}` : `name:${worker.name.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
+    const current = byWorker.get(key);
+    if (!current || uiWorkerQuality(worker) > uiWorkerQuality(current)) {
+      byWorker.set(key, worker);
+    }
+  });
+  return [...byWorker.values()];
+}
+
+function uiWorkerQuality(worker: WorkerProfile): number {
+  return (
+    (worker.popularity || 0) +
+    (worker.momentum || 0) +
+    (worker.recentMatchCount || 0) * 5 +
+    (worker.recentSegmentCount || 0) * 3 +
+    worker.currentTitles.length * 100
+  );
 }
 
 function severityValue(severity: "Low" | "Medium" | "High" | "Critical"): number {

@@ -50,7 +50,7 @@ export function buildSaveAnalysis(
     ? filterRecordsToRoster(extractPwsSegments(inspection, selectedCompany.id), workers)
     : filterRecordsToRoster(extractSegments(inspection, workerLookup, mappingProfile), workers);
   const rivalries = pwsSchema ? extractPwsRivalries(inspection, selectedCompany.id) : [];
-  const enrichedWorkers = enrichWorkers(workers, matches, segments, titles);
+  const enrichedWorkers = dedupeAnalysisWorkers(enrichWorkers(workers, matches, segments, titles));
   const pushMismatch = buildPushMismatch(enrichedWorkers);
   const diagnostics = buildDiagnostics(enrichedWorkers, titles, matches, segments, pushMismatch, rivalries);
   const weeklyPriorities = buildWeeklyPriorities(diagnostics);
@@ -917,6 +917,28 @@ function buildWorkerWarnings(
   }
   if (!warnings.length) warnings.push("No major warnings");
   return warnings;
+}
+
+function dedupeAnalysisWorkers(workers: WorkerProfile[]): WorkerProfile[] {
+  const byWorker = new Map<string, WorkerProfile>();
+  workers.forEach((worker) => {
+    const key = worker.rawId ? `id:${worker.rawId}` : `name:${normalize(worker.name)}`;
+    const current = byWorker.get(key);
+    if (!current || workerQualityScore(worker) > workerQualityScore(current)) {
+      byWorker.set(key, worker);
+    }
+  });
+  return [...byWorker.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
+function workerQualityScore(worker: WorkerProfile): number {
+  return (
+    (worker.popularity || 0) +
+    (worker.momentum || 0) +
+    (worker.recentMatchCount || 0) * 5 +
+    (worker.recentSegmentCount || 0) * 3 +
+    (worker.currentTitles.length ? 100 : 0)
+  );
 }
 
 function buildPushMismatch(workers: WorkerProfile[]): PushMismatchResult[] {
