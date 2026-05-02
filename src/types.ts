@@ -10,6 +10,7 @@ export type TabKey =
   | "push-groups"
   | "push-mismatch"
   | "ratings-analytics"
+  | "rivalries"
   | "titles"
   | "booking-warnings"
   | "ppv-build-checker"
@@ -164,6 +165,24 @@ export interface TitleRecord {
   recentDefences: number;
   recentChallengers: string[];
   warningStatus: Severity;
+  prestige?: number;
+  type?: string;
+  genderLimits?: string;
+}
+
+export interface RivalryRecord {
+  id: string;
+  name: string;
+  active: boolean;
+  startDate: string;
+  endDate: string;
+  participants: string[];
+  recentSegmentCount: number;
+  averageRating: number | null;
+  latestRating: number | null;
+  trend: "Rising" | "Cooling" | "Stable" | "Unmapped";
+  status: Severity;
+  recommendation: string;
 }
 
 export interface PushMismatchResult {
@@ -203,6 +222,7 @@ export interface SaveAnalysis {
   titles: TitleRecord[];
   matches: MatchRecord[];
   segments: SegmentRecord[];
+  rivalries: RivalryRecord[];
   diagnostics: Diagnostic[];
   weeklyPriorities: WeeklyPriority[];
   pushMismatch: PushMismatchResult[];

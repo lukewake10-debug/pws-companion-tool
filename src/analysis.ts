@@ -7,6 +7,7 @@ import type {
   MappingProfile,
   MatchRecord,
   PushMismatchResult,
+  RivalryRecord,
   SaveAnalysis,
   SegmentRecord,
   Severity,
@@ -48,9 +49,10 @@ export function buildSaveAnalysis(
   const segments = pwsSchema
     ? filterRecordsToRoster(extractPwsSegments(inspection, selectedCompany.id), workers)
     : filterRecordsToRoster(extractSegments(inspection, workerLookup, mappingProfile), workers);
+  const rivalries = pwsSchema ? extractPwsRivalries(inspection, selectedCompany.id) : [];
   const enrichedWorkers = enrichWorkers(workers, matches, segments, titles);
   const pushMismatch = buildPushMismatch(enrichedWorkers);
-  const diagnostics = buildDiagnostics(enrichedWorkers, titles, matches, segments, pushMismatch);
+  const diagnostics = buildDiagnostics(enrichedWorkers, titles, matches, segments, pushMismatch, rivalries);
   const weeklyPriorities = buildWeeklyPriorities(diagnostics);
   const unmapped = buildUnmappedList(inspection, workers, matches, segments, titles);
   const importSummary = buildImportSummary(selectedCompany.name, companyCandidates, enrichedWorkers, titles, matches, segments, unmapped);
@@ -60,6 +62,7 @@ export function buildSaveAnalysis(
     titles,
     matches,
     segments,
+    rivalries,
     diagnostics,
     weeklyPriorities,
     pushMismatch,
@@ -81,6 +84,7 @@ function emptyAnalysis(): SaveAnalysis {
     titles: [],
     matches: [],
     segments: [],
+    rivalries: [],
     diagnostics: [],
     weeklyPriorities: [],
     pushMismatch: [],
@@ -307,8 +311,74 @@ function extractPwsTitles(inspection: DatabaseInspection, promotionId: string): 
         recentDefences: Number(title.defences || 0),
         recentChallengers: [],
         warningStatus: titleSeverity(won),
+        prestige: Math.round(Number(title.prestige || 0)),
+        type: String(title.type || ""),
+        genderLimits: String(title.genderLimits || ""),
       };
-    });
+    })
+    .sort((a, b) => (b.prestige ?? 0) - (a.prestige ?? 0) || a.name.localeCompare(b.name));
+}
+
+function extractPwsRivalries(inspection: DatabaseInspection, promotionId: string): RivalryRecord[] {
+  const storylines = getTable(inspection, "storylines")?.sampleRows || [];
+  const storylineWorkers = getTable(inspection, "storylineworkers")?.sampleRows || [];
+  const histories = getTable(inspection, "storylinehistories")?.sampleRows || [];
+  const contracts = new Map((getTable(inspection, "contracts")?.sampleRows || []).map((row) => [String(row.contractID), row]));
+  const workers = new Map((getTable(inspection, "workers")?.sampleRows || []).map((row) => [String(row.workerID), String(row.name || "")]));
+  const participantsByStoryline = groupRows(storylineWorkers, "storylineID");
+  const historiesByStoryline = groupRows(histories, "storylineID");
+
+  return storylines
+    .filter((storyline) => String(storyline.promotionID) === String(promotionId))
+    .filter((storyline) => Number(storyline.active) === 1 || !storyline.endDate)
+    .map((storyline) => {
+      const participantRows = participantsByStoryline.get(String(storyline.storylineID)) || [];
+      const participants = unique(
+        participantRows
+          .map((row) => {
+            const contract = contracts.get(String(row.contractID));
+            return contract ? workers.get(String(contract.workerID)) || "" : "";
+          })
+          .filter(Boolean),
+      );
+      const ratings = (historiesByStoryline.get(String(storyline.storylineID)) || [])
+        .map((row) => pickNumber(row, ["segmentRating"]))
+        .filter(isNumber);
+      const recent = ratings.slice(0, 5);
+      const previous = ratings.slice(5, 10);
+      const latestRating = ratings[0] ?? null;
+      const averageRating = averageOrNull(recent);
+      const previousAverage = averageOrNull(previous);
+      const trend: RivalryRecord["trend"] =
+        averageRating === null || previousAverage === null
+          ? "Unmapped"
+          : averageRating >= previousAverage + 4
+            ? "Rising"
+            : averageRating <= previousAverage - 4
+              ? "Cooling"
+              : "Stable";
+      const status: Severity = trend === "Cooling" ? "High" : participants.length < 2 ? "Medium" : "Low";
+      return {
+        id: String(storyline.storylineID),
+        name: String(storyline.storylineName || "Unnamed storyline"),
+        active: Number(storyline.active) === 1,
+        startDate: String(storyline.startDate || unknown),
+        endDate: String(storyline.endDate || ""),
+        participants,
+        recentSegmentCount: ratings.length,
+        averageRating,
+        latestRating,
+        trend,
+        status,
+        recommendation:
+          trend === "Cooling"
+            ? "Refresh the rivalry with a decisive angle, stipulation, turn, or a new supporting participant."
+            : participants.length < 2
+              ? "Add or confirm storyline participants so the rivalry can be audited properly."
+              : "Keep building; recent segment ratings look usable.",
+      };
+    })
+    .sort((a, b) => severityRank(b.status) - severityRank(a.status) || (b.averageRating ?? 0) - (a.averageRating ?? 0));
 }
 
 function extractPwsMatches(inspection: DatabaseInspection, promotionId: string): MatchRecord[] {
@@ -893,6 +963,7 @@ function buildDiagnostics(
   matches: MatchRecord[],
   segments: SegmentRecord[],
   pushMismatch: PushMismatchResult[],
+  rivalries: RivalryRecord[],
 ): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const add = (
@@ -1044,7 +1115,21 @@ function buildDiagnostics(
     ),
   );
 
-  return diagnostics;
+  rivalries
+    .filter((rivalry) => rivalry.status !== "Low")
+    .slice(0, 5)
+    .forEach((rivalry) =>
+      add(
+        rivalry.trend === "Cooling" ? "Storyline is cooling." : "Storyline mapping needs attention.",
+        rivalry.status,
+        `${rivalry.name}: ${rivalry.trend}; average rating ${rivalry.averageRating ?? unknown}; participants ${rivalry.participants.join(", ") || unknown}.`,
+        "Cold or unclear rivalries make weekly booking feel less purposeful.",
+        rivalry.recommendation,
+        "Book a focused angle this week, then follow with a match or clear next step on the next show.",
+      ),
+    );
+
+  return diagnostics.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
 }
 
 function buildWeeklyPriorities(diagnostics: Diagnostic[]): WeeklyPriority[] {

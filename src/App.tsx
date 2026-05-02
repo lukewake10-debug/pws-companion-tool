@@ -319,6 +319,7 @@ export function App() {
                 activeRoster={activeRoster}
                 inspection={inspection}
                 analysis={analysis}
+                setActiveTab={setActiveTab}
               />
             ) : null}
             {activeTab === "weekly-priorities" ? <WeeklyPriorities analysis={analysis} /> : null}
@@ -326,6 +327,7 @@ export function App() {
             {activeTab === "push-groups" ? <PushGroups pushGroups={pushGroups} /> : null}
             {activeTab === "push-mismatch" ? <PushMismatch analysis={analysis} /> : null}
             {activeTab === "ratings-analytics" ? <RatingsAnalytics analysis={analysis} /> : null}
+            {activeTab === "rivalries" ? <Rivalries analysis={analysis} /> : null}
             {activeTab === "titles" ? <Titles selectedPromotion={selectedPromotion} analysis={analysis} /> : null}
             {activeTab === "booking-warnings" ? <BookingWarnings analysis={analysis} /> : null}
             {activeTab === "ppv-build-checker" ? <PpvBuildChecker /> : null}
@@ -516,38 +518,33 @@ function Dashboard({
   activeRoster,
   inspection,
   analysis,
+  setActiveTab,
 }: {
   selectedPromotion: string;
   latestSnapshot: SnapshotMetadata | null;
   activeRoster: WorkerProfile[];
   inspection: DatabaseInspection | null;
   analysis: SaveAnalysis;
+  setActiveTab: (tab: TabKey) => void;
 }) {
-  const champions = activeRoster.filter((worker) => worker.currentTitles.length > 0);
-  const mainEventCount = activeRoster.filter((worker) => /main/i.test(worker.push)).length;
-  const womenCount = activeRoster.filter((worker) => /women|woman|female/i.test(`${worker.currentTitles.join(" ")} ${worker.brandOrShow}`)).length;
   const warningCount = analysis.diagnostics.filter((item) => item.severity === "High" || item.severity === "Critical").length;
   const titleWarnings = analysis.titles.filter((title) => title.warningStatus !== "Low").length;
   const avgMatch = average(activeRoster.map((worker) => worker.recentMatchRatingAverage ?? 0).filter(Boolean));
   const avgSegment = average(activeRoster.map((worker) => worker.recentSegmentRatingAverage ?? 0).filter(Boolean));
+  const topPriority = analysis.weeklyPriorities[0];
+  const coolingRivalries = analysis.rivalries.filter((rivalry) => rivalry.status !== "Low").length;
 
   return (
     <div className="space-y-5">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Selected Promotion" value={selectedPromotion} severity="Low" />
-        <Metric label="Active Roster Count" value={String(activeRoster.length)} severity="Low" />
-        <Metric label="Last Imported Snapshot" value={latestSnapshot ? formatDate(latestSnapshot.importedDate) : "None"} severity={latestSnapshot ? "Low" : "High"} />
-        <Metric label="Imported Tables" value={inspection ? String(inspection.tables.length) : "0"} severity={inspection ? "Low" : "Medium"} />
-      </div>
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Booking Warnings" value={String(warningCount)} severity={warningCount ? "High" : "Low"} />
-        <Metric label="Title Management" value={titleWarnings ? `${titleWarnings} warnings` : "Clear"} severity={titleWarnings ? "High" : "Low"} />
-        <Metric label="Main Event Push Group" value={`${mainEventCount} workers`} severity="Low" />
-        <Metric label="Women's Division Depth" value={womenCount ? `${womenCount}+ tracked` : "Needs mapping"} severity="Medium" />
-        <Metric label="Match Rating Health" value={avgMatch ? String(avgMatch) : "Needs mapping"} severity={avgMatch ? "Low" : "Medium"} />
-        <Metric label="Segment Rating Health" value={avgSegment ? String(avgSegment) : "Needs mapping"} severity={avgSegment ? "Low" : "Medium"} />
-        <Metric label="Imported Matches" value={String(analysis.matches.length)} severity={analysis.matches.length ? "Low" : "Medium"} />
-        <Metric label="Imported Segments" value={String(analysis.segments.length)} severity={analysis.segments.length ? "Low" : "Medium"} />
+        <Metric label="Roster" value={`${activeRoster.length} active`} severity="Low" onClick={() => setActiveTab("roster-audit")} />
+        <Metric label="Booking Warnings" value={String(warningCount)} severity={warningCount ? "High" : "Low"} onClick={() => setActiveTab("booking-warnings")} />
+        <Metric label="Title Audit" value={titleWarnings ? `${titleWarnings} warnings` : `${analysis.titles.length} active`} severity={titleWarnings ? "High" : "Low"} onClick={() => setActiveTab("titles")} />
+        <Metric label="Rivalries" value={coolingRivalries ? `${coolingRivalries} need work` : `${analysis.rivalries.length} tracked`} severity={coolingRivalries ? "High" : "Low"} onClick={() => setActiveTab("rivalries")} />
+        <Metric label="Match Rating Avg" value={avgMatch ? String(avgMatch) : "Needs data"} severity={avgMatch ? "Low" : "Medium"} onClick={() => setActiveTab("ratings-analytics")} />
+        <Metric label="Segment Rating Avg" value={avgSegment ? String(avgSegment) : "Needs data"} severity={avgSegment ? "Low" : "Medium"} onClick={() => setActiveTab("ratings-analytics")} />
+        <Metric label="Snapshot" value={latestSnapshot ? formatDate(latestSnapshot.importedDate) : "None"} severity={latestSnapshot ? "Low" : "High"} onClick={() => setActiveTab("save-import")} />
+        <Metric label="Top Priority" value={topPriority ? topPriority.severity : "Clear"} severity={topPriority?.severity ?? "Low"} onClick={() => setActiveTab("weekly-priorities")} />
       </div>
       {analysis.unmapped.length ? (
         <section className="rounded-md border border-roh-gold/30 bg-roh-gold/10 p-5">
@@ -565,19 +562,11 @@ function Dashboard({
         <h3 className="mb-4 text-lg font-semibold tracking-normal">Current Champions</h3>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {analysis.titles.length ? (
-            analysis.titles.map((title) => (
+            [...analysis.titles].sort((a, b) => (b.prestige ?? 0) - (a.prestige ?? 0) || a.name.localeCompare(b.name)).slice(0, 6).map((title) => (
               <div key={title.id} className="rounded-md border border-white/10 bg-deck-850 p-4">
                 <p className="font-semibold">{title.name}</p>
                 <p className="mt-1 text-sm text-roh-gold">{title.champion || "Champion unmapped"}</p>
                 <p className="mt-2 text-sm text-slate-400">Last defence: {title.lastDefenceDate}</p>
-              </div>
-            ))
-          ) : champions.length ? (
-            champions.map((worker) => (
-              <div key={worker.id} className="rounded-md border border-white/10 bg-deck-850 p-4">
-                <p className="font-semibold">{worker.name}</p>
-                <p className="mt-1 text-sm text-roh-gold">{worker.currentTitles.join(", ")}</p>
-                <p className="mt-2 text-sm text-slate-400">{worker.push} | {worker.disposition}</p>
               </div>
             ))
           ) : (
@@ -814,27 +803,70 @@ function WeeklyPriorities({ analysis }: { analysis: SaveAnalysis }) {
   );
 }
 
+type SortDirection = "asc" | "desc";
+
 function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
+  const [search, setSearch] = useState("");
+  const [pushFilter, setPushFilter] = useState("All");
+  const [sort, setSort] = useState<{ key: keyof WorkerProfile; direction: SortDirection }>({ key: "name", direction: "asc" });
+  const pushOptions = ["All", ...new Set(workers.map((worker) => worker.push).filter(Boolean).sort())];
+  const filteredWorkers = workers
+    .filter((worker) => {
+      const haystack = `${worker.name} ${worker.push} ${worker.disposition} ${worker.injuryStatus} ${worker.currentTitles.join(" ")}`.toLowerCase();
+      const matchesSearch = !search || haystack.includes(search.toLowerCase());
+      const matchesWomen = search.toLowerCase() !== "women" && search.toLowerCase() !== "female" ? true : /female|women/i.test(`${worker.name} ${worker.currentTitles.join(" ")}`);
+      const matchesPush = pushFilter === "All" || worker.push === pushFilter;
+      return matchesSearch && matchesWomen && matchesPush;
+    })
+    .sort((a, b) => compareValues(a[sort.key], b[sort.key], sort.direction));
+
+  function changeSort(key: keyof WorkerProfile) {
+    setSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  }
+
   return (
     <section className="rounded-md border border-white/10 bg-deck-900">
-      <div className="flex flex-wrap gap-2 border-b border-white/10 p-4">
-        {["Push", "Disposition", "Fatigue risk", "Morale risk", "Injury status", "Push Mismatch", "Creative Override Active"].map((filter) => (
-          <button key={filter} type="button" className="h-10 rounded-md border border-white/10 bg-deck-850 px-3 text-sm text-slate-200">
-            {filter}
-          </button>
-        ))}
+      <div className="flex flex-wrap gap-3 border-b border-white/10 p-4">
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search roster, type women, title, Push, warning..."
+          className="h-11 min-w-72 flex-1 rounded-md border border-white/10 bg-deck-850 px-3 text-sm outline-none focus:border-roh-gold"
+        />
+        <select
+          value={pushFilter}
+          onChange={(event) => setPushFilter(event.target.value)}
+          className="h-11 rounded-md border border-white/10 bg-deck-850 px-3 text-sm outline-none focus:border-roh-gold"
+        >
+          {pushOptions.map((option) => (
+            <option key={option}>{option}</option>
+          ))}
+        </select>
       </div>
       <div className="overflow-x-auto">
         <table className="min-w-full text-left text-sm">
           <thead className="bg-deck-850 text-slate-400">
             <tr>
-              {["Name", "Push", "Disposition", "Popularity", "Momentum", "Morale", "Fatigue", "Last Booked", "Recent Record", "Match Avg", "Segment Avg", "Titles", "Warnings"].map((header) => (
-                <th key={header} className="px-4 py-3 font-medium">{header}</th>
-              ))}
+              <SortableTh label="Name" active={sort.key === "name"} direction={sort.direction} onClick={() => changeSort("name")} />
+              <SortableTh label="Push" active={sort.key === "push"} direction={sort.direction} onClick={() => changeSort("push")} />
+              <SortableTh label="Disposition" active={sort.key === "disposition"} direction={sort.direction} onClick={() => changeSort("disposition")} />
+              <SortableTh label="Popularity" active={sort.key === "popularity"} direction={sort.direction} onClick={() => changeSort("popularity")} />
+              <SortableTh label="Momentum" active={sort.key === "momentum"} direction={sort.direction} onClick={() => changeSort("momentum")} />
+              <SortableTh label="Morale" active={sort.key === "morale"} direction={sort.direction} onClick={() => changeSort("morale")} />
+              <SortableTh label="Fatigue" active={sort.key === "fatigue"} direction={sort.direction} onClick={() => changeSort("fatigue")} />
+              <SortableTh label="Last Booked" active={sort.key === "lastBooked"} direction={sort.direction} onClick={() => changeSort("lastBooked")} />
+              <th className="px-4 py-3 font-medium">Recent Record</th>
+              <SortableTh label="Match Avg" active={sort.key === "recentMatchRatingAverage"} direction={sort.direction} onClick={() => changeSort("recentMatchRatingAverage")} />
+              <SortableTh label="Segment Avg" active={sort.key === "recentSegmentRatingAverage"} direction={sort.direction} onClick={() => changeSort("recentSegmentRatingAverage")} />
+              <th className="px-4 py-3 font-medium">Titles</th>
+              <th className="px-4 py-3 font-medium">Warnings</th>
             </tr>
           </thead>
           <tbody>
-            {workers.map((worker) => (
+            {filteredWorkers.map((worker) => (
               <tr key={worker.id} className="border-t border-white/10">
                 <td className="px-4 py-3 font-semibold">{worker.name}</td>
                 <td className="px-4 py-3">{worker.push}</td>
@@ -969,31 +1001,43 @@ function RatingsAnalytics({ analysis }: { analysis: SaveAnalysis }) {
 }
 
 function Titles({ selectedPromotion, analysis }: { selectedPromotion: string; analysis: SaveAnalysis }) {
+  const [sort, setSort] = useState<{ key: "prestige" | "name" | "recentDefences" | "daysSinceLastDefence"; direction: SortDirection }>({ key: "prestige", direction: "desc" });
+  const sortedTitles = [...analysis.titles].sort((a, b) => compareValues(a[sort.key], b[sort.key], sort.direction));
+  function changeSort(key: typeof sort.key) {
+    setSort((current) => ({ key, direction: current.key === key && current.direction === "asc" ? "desc" : "asc" }));
+  }
+
   return (
     <section className="rounded-md border border-white/10 bg-deck-900 p-5">
       <h3 className="text-xl font-semibold tracking-normal">{selectedPromotion} Title Audit</h3>
-      <div className="mt-4 grid gap-3 xl:grid-cols-2">
+      <div className="mt-4 overflow-x-auto rounded-md border border-white/10">
         {analysis.titles.length ? (
-          analysis.titles.map((title) => (
-            <div key={title.id} className="rounded-md border border-white/10 bg-deck-850 p-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="font-semibold">{title.name}</p>
-                  <p className="mt-1 text-sm text-roh-gold">Champion: {title.champion || "Unmapped"}</p>
-                </div>
-                <SeverityPill severity={title.warningStatus} />
-              </div>
-              <div className="mt-3 grid gap-2 text-sm text-slate-400 md:grid-cols-2">
-                <p>Last defence: {title.lastDefenceDate}</p>
-                <p>Days since defence: {title.daysSinceLastDefence ?? "Unmapped"}</p>
-                <p>Recent defences: {title.recentDefences}</p>
-                <p>Recent challengers: {title.recentChallengers.join(", ") || "Unmapped"}</p>
-              </div>
-              <p className="mt-3 text-sm text-slate-300">
-                Planned challenger and Planned Title Direction are user-created planning fields. Title holder and defence data come from the imported save where mapped.
-              </p>
-            </div>
-          ))
+          <table className="min-w-full text-left text-sm">
+            <thead className="bg-deck-850 text-slate-400">
+              <tr>
+                <SortableTh label="Championship" active={sort.key === "name"} direction={sort.direction} onClick={() => changeSort("name")} />
+                <th className="px-4 py-3 font-medium">Champion</th>
+                <SortableTh label="Prestige" active={sort.key === "prestige"} direction={sort.direction} onClick={() => changeSort("prestige")} />
+                <th className="px-4 py-3 font-medium">Type</th>
+                <SortableTh label="Defences" active={sort.key === "recentDefences"} direction={sort.direction} onClick={() => changeSort("recentDefences")} />
+                <SortableTh label="Days Since Won" active={sort.key === "daysSinceLastDefence"} direction={sort.direction} onClick={() => changeSort("daysSinceLastDefence")} />
+                <th className="px-4 py-3 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedTitles.map((title) => (
+                <tr key={title.id} className="border-t border-white/10">
+                  <td className="px-4 py-3 font-semibold">{title.name}</td>
+                  <td className="px-4 py-3 text-roh-gold">{title.champion || "Unmapped"}</td>
+                  <td className="px-4 py-3">{title.prestige ?? "Unmapped"}</td>
+                  <td className="px-4 py-3">{title.type || title.genderLimits || "Unmapped"}</td>
+                  <td className="px-4 py-3">{title.recentDefences}</td>
+                  <td className="px-4 py-3">{title.daysSinceLastDefence ?? "Unmapped"}</td>
+                  <td className="px-4 py-3"><SeverityPill severity={title.warningStatus} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         ) : (
           <EmptyState text="No title table was confidently mapped yet. Use Database Mapping to confirm Title, Title Holder and Last Defence fields if the save uses unusual column names." />
         )}
@@ -1003,10 +1047,11 @@ function Titles({ selectedPromotion, analysis }: { selectedPromotion: string; an
 }
 
 function BookingWarnings({ analysis }: { analysis: SaveAnalysis }) {
+  const diagnostics = [...analysis.diagnostics].sort((a, b) => severityValue(b.severity) - severityValue(a.severity));
   return (
     <div className="space-y-4">
-      {analysis.diagnostics.length ? (
-        analysis.diagnostics.map((diagnostic) => (
+      {diagnostics.length ? (
+        diagnostics.map((diagnostic) => (
           <section key={diagnostic.id} className="rounded-md border border-white/10 bg-deck-900 p-5">
             <div className="flex items-start justify-between gap-4">
               <h3 className="text-xl font-semibold tracking-normal">{diagnostic.problem}</h3>
@@ -1022,6 +1067,68 @@ function BookingWarnings({ analysis }: { analysis: SaveAnalysis }) {
         <EmptyState text="No booking warnings yet. Import roster, title, match and segment data to generate diagnostics." />
       )}
     </div>
+  );
+}
+
+function Rivalries({ analysis }: { analysis: SaveAnalysis }) {
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<{ key: "status" | "name" | "averageRating" | "latestRating" | "trend"; direction: SortDirection }>({ key: "status", direction: "desc" });
+  const rivalries = analysis.rivalries
+    .filter((rivalry) => `${rivalry.name} ${rivalry.participants.join(" ")} ${rivalry.trend}`.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => sort.key === "status" ? compareValues(severityValue(a.status), severityValue(b.status), sort.direction) : compareValues(a[sort.key], b[sort.key], sort.direction));
+  function changeSort(key: typeof sort.key) {
+    setSort((current) => ({ key, direction: current.key === key && current.direction === "asc" ? "desc" : "asc" }));
+  }
+
+  return (
+    <section className="rounded-md border border-white/10 bg-deck-900">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 p-4">
+        <div>
+          <h3 className="text-xl font-semibold tracking-normal">In-Game Rivalries</h3>
+          <p className="text-sm text-slate-400">Read from PWS storylines and recent storyline segment ratings.</p>
+        </div>
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search rivalry or worker..."
+          className="h-11 min-w-72 rounded-md border border-white/10 bg-deck-850 px-3 text-sm outline-none focus:border-roh-gold"
+        />
+      </div>
+      {rivalries.length ? (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-left text-sm">
+            <thead className="bg-deck-850 text-slate-400">
+              <tr>
+                <SortableTh label="Rivalry" active={sort.key === "name"} direction={sort.direction} onClick={() => changeSort("name")} />
+                <th className="px-4 py-3 font-medium">Participants</th>
+                <SortableTh label="Trend" active={sort.key === "trend"} direction={sort.direction} onClick={() => changeSort("trend")} />
+                <SortableTh label="Average" active={sort.key === "averageRating"} direction={sort.direction} onClick={() => changeSort("averageRating")} />
+                <SortableTh label="Latest" active={sort.key === "latestRating"} direction={sort.direction} onClick={() => changeSort("latestRating")} />
+                <SortableTh label="Status" active={sort.key === "status"} direction={sort.direction} onClick={() => changeSort("status")} />
+                <th className="px-4 py-3 font-medium">Recommendation</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rivalries.map((rivalry) => (
+                <tr key={rivalry.id} className="border-t border-white/10 align-top">
+                  <td className="px-4 py-3 font-semibold">{rivalry.name}</td>
+                  <td className="px-4 py-3">{rivalry.participants.join(", ") || "Unmapped"}</td>
+                  <td className="px-4 py-3">{rivalry.trend}</td>
+                  <td className="px-4 py-3">{rivalry.averageRating ?? "Unmapped"}</td>
+                  <td className="px-4 py-3">{rivalry.latestRating ?? "Unmapped"}</td>
+                  <td className="px-4 py-3"><SeverityPill severity={rivalry.status} /></td>
+                  <td className="px-4 py-3 text-slate-300">{rivalry.recommendation}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="p-5">
+          <EmptyState text="No active PWS storylines were found in this import." />
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1146,15 +1253,16 @@ function BigButton({
   );
 }
 
-function Metric({ label, value, severity }: { label: string; value: string; severity: "Low" | "Medium" | "High" | "Critical" }) {
+function Metric({ label, value, severity, onClick }: { label: string; value: string; severity: "Low" | "Medium" | "High" | "Critical"; onClick?: () => void }) {
+  const Component = onClick ? "button" : "div";
   return (
-    <div className="rounded-md border border-white/10 bg-deck-900 p-4">
+    <Component type={onClick ? "button" : undefined} onClick={onClick} className={`rounded-md border border-white/10 bg-deck-900 p-4 text-left ${onClick ? "transition hover:border-roh-gold hover:bg-deck-850" : ""}`}>
       <div className="flex items-start justify-between gap-3">
         <p className="text-sm text-slate-400">{label}</p>
         <SeverityPill severity={severity} />
       </div>
       <p className="mt-3 text-2xl font-bold tracking-normal">{value}</p>
-    </div>
+    </Component>
   );
 }
 
@@ -1164,6 +1272,27 @@ function MiniMetric({ label, value }: { label: string; value: string | number })
       <p className="text-xs text-slate-500">{label}</p>
       <p className="mt-1 font-semibold">{value}</p>
     </div>
+  );
+}
+
+function SortableTh({
+  label,
+  active,
+  direction,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  direction: SortDirection;
+  onClick: () => void;
+}) {
+  return (
+    <th className="px-4 py-3 font-medium">
+      <button type="button" onClick={onClick} className="flex items-center gap-1 text-left hover:text-roh-gold">
+        {label}
+        <span className="text-xs">{active ? (direction === "asc" ? "▲" : "▼") : ""}</span>
+      </button>
+    </th>
   );
 }
 
@@ -1346,6 +1475,18 @@ function downloadReport(label: string, analysis: SaveAnalysis) {
   anchor.download = `${fileBase || "pws-save-auditor-report"}.json`;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function compareValues(left: unknown, right: unknown, direction: SortDirection): number {
+  const modifier = direction === "asc" ? 1 : -1;
+  if (typeof left === "number" || typeof right === "number") {
+    return (((Number(left) || 0) - (Number(right) || 0)) * modifier);
+  }
+  return String(left ?? "").localeCompare(String(right ?? "")) * modifier;
+}
+
+function severityValue(severity: "Low" | "Medium" | "High" | "Critical"): number {
+  return { Low: 1, Medium: 2, High: 3, Critical: 4 }[severity];
 }
 
 function splitCamel(value: string): string {

@@ -11,6 +11,7 @@ import {
   ListChecks,
   Medal,
   Settings,
+  Swords,
 } from "lucide-react";
 import type {
   CreativeNotes,
@@ -33,6 +34,7 @@ export const navItems: NavItem[] = [
   { key: "push-groups", label: "Push Groups", icon: BarChart3 },
   { key: "push-mismatch", label: "Push Mismatch", icon: AlertTriangle },
   { key: "ratings-analytics", label: "Ratings Analytics", icon: Activity },
+  { key: "rivalries", label: "Rivalries", icon: Swords },
   { key: "titles", label: "Titles", icon: Medal },
   { key: "booking-warnings", label: "Booking Warnings", icon: HeartPulse },
   { key: "ppv-build-checker", label: "PPV Build Checker", icon: CalendarClock },
