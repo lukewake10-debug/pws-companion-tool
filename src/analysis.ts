@@ -14,6 +14,7 @@ import type {
   TableInfo,
   TitleRecord,
   WeeklyPriority,
+  WorkerOverallBreakdown,
   WorkerProfile,
 } from "./types";
 
@@ -160,11 +161,16 @@ function extractWorkers(
           "contract_company",
         ]) || (linkedRow ? selectedPromotion : selectedPromotion);
       const company = linkedRow ? selectedPromotion : resolveLookup(companyLookup, rawCompany);
+      const popularity = pickMappedNumber(row, table, mappingProfile, "Popularity", ["popularity", "pop", "overness", "popularity_value", "popularityvalue"]) ?? 0;
+      const momentum = pickMappedNumber(row, table, mappingProfile, "Momentum", ["momentum"]) ?? 0;
+      const overall = buildFallbackOverall({ popularity, momentum });
 
       const worker: WorkerProfile = {
         id: slug(`${id}-${name}`),
         rawId: id,
         name,
+        overallRating: overall.overall,
+        overallBreakdown: overall.breakdown,
         company,
         brandOrShow: resolveLookup(
           companyLookup,
@@ -174,8 +180,8 @@ function extractWorkers(
         disposition:
           pickMappedString(row, table, mappingProfile, "Disposition", ["disposition", "alignment", "face_heel", "faceheel", "heel_face", "alignment_name"]) ||
           unknown,
-        popularity: pickMappedNumber(row, table, mappingProfile, "Popularity", ["popularity", "pop", "overness", "popularity_value", "popularityvalue"]) ?? 0,
-        momentum: pickMappedNumber(row, table, mappingProfile, "Momentum", ["momentum"]) ?? 0,
+        popularity,
+        momentum,
         morale: pickMappedNumber(row, table, mappingProfile, "Morale", ["morale", "happiness"]) ?? 0,
         fatigue: pickMappedNumber(row, table, mappingProfile, "Fatigue", ["fatigue", "tiredness", "condition"]) ?? 0,
         injuryStatus: pickMappedString(row, table, mappingProfile, "Injury Status", ["injury_status", "injurystatus", "injury", "injured", "health_status"]) || unknown,
@@ -263,10 +269,13 @@ function extractPwsWorkers(
       const worker = workerById.get(String(contract.workerID)) || {};
       const name = String(worker.name || contract.contractName || `Worker ${contract.workerID}`);
       const id = String(contract.workerID || contract.contractID || name);
+      const overall = buildPwsOverall(worker, contract);
       return {
         id: slug(`${id}-${name}`),
         rawId: id,
         name,
+        overallRating: overall.overall,
+        overallBreakdown: overall.breakdown,
         company: companyName,
         brandOrShow: brands.get(String(contract.brand)) || "",
         push: String(contract.push || unknown),
@@ -967,6 +976,94 @@ function workerImportanceScore(worker: WorkerProfile): number {
   );
 }
 
+function buildPwsOverall(worker: Record<string, unknown>, contract: Record<string, unknown>): { overall: number; breakdown: WorkerOverallBreakdown } {
+  const starPower = pwsNumber(worker, ["starPower"]);
+  const popularity = pwsNumber(worker, ["northAmericaPop", "popularity"]);
+  const wrestlingAbility = averageScore([
+    pwsNumber(worker, ["wrestlingSkill"]),
+    averageScore([
+      pwsNumber(worker, ["brawling"]),
+      pwsNumber(worker, ["technical"]),
+      pwsNumber(worker, ["aerial"]),
+      pwsNumber(worker, ["puroresu"]),
+    ]),
+    pwsNumber(worker, ["basics"]),
+    pwsNumber(worker, ["athleticism"]),
+  ]);
+  const psychology = pwsNumber(worker, ["psychology"]);
+  const entertainment = averageScore([
+    pwsNumber(worker, ["entertainment"]),
+    pwsNumber(worker, ["charisma"]),
+    pwsNumber(worker, ["acting"]),
+  ]);
+  const marketability = averageScore([
+    starPower,
+    pwsNumber(worker, ["sexAppeal"]),
+    pwsNumber(worker, ["intimidation"]),
+    pwsNumber(worker, ["charisma"]),
+    pwsNumber(worker, ["entertainment"]),
+    popularity,
+  ]);
+  const reliability = averageScore([
+    pwsNumber(worker, ["consistency"]),
+    pwsNumber(worker, ["safety"]),
+    pwsNumber(worker, ["stamina"]),
+    pwsNumber(worker, ["toughness"]),
+    pwsNumber(worker, ["resilience"]),
+  ]);
+  const momentum = pwsNumber(contract, ["momentum"]);
+  const breakdown = {
+    marketability,
+    starPower,
+    popularity,
+    wrestlingAbility,
+    psychology,
+    entertainment,
+    reliability,
+  };
+
+  return {
+    overall: weightedOverall([
+      [marketability, 0.2],
+      [starPower, 0.15],
+      [popularity, 0.15],
+      [wrestlingAbility, 0.2],
+      [psychology, 0.15],
+      [entertainment, 0.1],
+      [reliability, 0.03],
+      [momentum, 0.02],
+    ]),
+    breakdown,
+  };
+}
+
+function buildFallbackOverall(values: { popularity: number; momentum: number }): { overall: number; breakdown: WorkerOverallBreakdown } {
+  const popularity = clampScore(values.popularity);
+  const momentum = clampScore(values.momentum);
+  const baseline = averageScore([popularity, momentum]);
+  const breakdown = {
+    marketability: popularity,
+    starPower: baseline,
+    popularity,
+    wrestlingAbility: baseline,
+    psychology: baseline,
+    entertainment: baseline,
+    reliability: baseline,
+  };
+  return {
+    overall: weightedOverall([
+      [breakdown.marketability, 0.2],
+      [breakdown.starPower, 0.15],
+      [breakdown.popularity, 0.15],
+      [breakdown.wrestlingAbility, 0.2],
+      [breakdown.psychology, 0.15],
+      [breakdown.entertainment, 0.1],
+      [breakdown.reliability, 0.05],
+    ]),
+    breakdown,
+  };
+}
+
 function buildPushMismatch(workers: WorkerProfile[]): PushMismatchResult[] {
   const popularityValues = workers.map((worker) => worker.popularity).filter((value) => value > 0);
   const momentumValues = workers.map((worker) => worker.momentum).filter((value) => value > 0);
@@ -1398,6 +1495,28 @@ function pickNumber(row: Record<string, unknown>, keys: string[]): number | null
   if (!value) return null;
   const numeric = Number(String(value).replace(/[^0-9.-]/g, ""));
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function pwsNumber(row: Record<string, unknown>, keys: string[]): number {
+  return clampScore(pickNumber(row, keys) ?? 0);
+}
+
+function averageScore(values: number[]): number {
+  const valid = values.filter((value) => Number.isFinite(value) && value > 0);
+  if (!valid.length) return 0;
+  return Math.round(valid.reduce((sum, value) => sum + value, 0) / valid.length);
+}
+
+function weightedOverall(entries: Array<[number, number]>): number {
+  const valid = entries.filter(([value]) => Number.isFinite(value) && value > 0);
+  const totalWeight = valid.reduce((sum, [, weight]) => sum + weight, 0);
+  if (!totalWeight) return 0;
+  return Math.round(valid.reduce((sum, [value, weight]) => sum + clampScore(value) * weight, 0) / totalWeight);
+}
+
+function clampScore(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
 }
 
 function lowerCaseKeys(row: Record<string, unknown>): Record<string, unknown> {

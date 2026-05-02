@@ -247,10 +247,33 @@ export const demoInspection: DatabaseInspection = {
   ],
 };
 
+const demoOverall = (
+  overallRating: number,
+  marketability: number,
+  starPower: number,
+  popularity: number,
+  wrestlingAbility: number,
+  psychology: number,
+  entertainment: number,
+  reliability: number,
+) => ({
+  overallRating,
+  overallBreakdown: {
+    marketability,
+    starPower,
+    popularity,
+    wrestlingAbility,
+    psychology,
+    entertainment,
+    reliability,
+  },
+});
+
 export const demoWorkers: WorkerProfile[] = [
   {
     id: "athena",
     name: "Athena",
+    ...demoOverall(84, 88, 86, 86, 82, 84, 80, 78),
     company: "ROH",
     brandOrShow: "ROH",
     push: "Main Event",
@@ -272,6 +295,7 @@ export const demoWorkers: WorkerProfile[] = [
   {
     id: "mark-briscoe",
     name: "Mark Briscoe",
+    ...demoOverall(79, 82, 80, 82, 78, 76, 74, 81),
     company: "ROH",
     brandOrShow: "ROH",
     push: "Main Event",
@@ -293,6 +317,7 @@ export const demoWorkers: WorkerProfile[] = [
   {
     id: "billie-starkz",
     name: "Billie Starkz",
+    ...demoOverall(73, 72, 70, 66, 77, 74, 71, 76),
     company: "ROH",
     brandOrShow: "ROH",
     push: "Upper Midcard",
@@ -314,6 +339,7 @@ export const demoWorkers: WorkerProfile[] = [
   {
     id: "lee-moriarty",
     name: "Lee Moriarty",
+    ...demoOverall(70, 64, 62, 57, 82, 75, 61, 78),
     company: "ROH",
     brandOrShow: "ROH",
     push: "Midcard",
@@ -335,6 +361,7 @@ export const demoWorkers: WorkerProfile[] = [
   {
     id: "undercard-worker",
     name: "Underused Prospect",
+    ...demoOverall(52, 48, 45, 42, 61, 55, 50, 58),
     company: "ROH",
     brandOrShow: "ROH",
     push: "Lower Midcard",

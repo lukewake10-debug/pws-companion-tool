@@ -95,6 +95,8 @@ export interface WorkerProfile {
   id: string;
   name: string;
   rawId?: string;
+  overallRating: number;
+  overallBreakdown: WorkerOverallBreakdown;
   company: string;
   brandOrShow: string;
   push: string;
@@ -123,6 +125,16 @@ export interface WorkerProfile {
   lastBooked: string;
   warnings: string[];
   creativeNotes: CreativeNotes;
+}
+
+export interface WorkerOverallBreakdown {
+  marketability: number;
+  starPower: number;
+  popularity: number;
+  wrestlingAbility: number;
+  psychology: number;
+  entertainment: number;
+  reliability: number;
 }
 
 export interface MatchRecord {

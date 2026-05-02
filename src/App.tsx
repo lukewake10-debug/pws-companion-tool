@@ -770,7 +770,10 @@ function PromotionAndRoster({
               className="mt-1 h-5 w-5 accent-roh-gold"
             />
             <span>
-              <span className="block font-semibold">{worker.name}</span>
+              <span className="flex items-center gap-2 font-semibold">
+                <span>{worker.name}</span>
+                <OverallBadge worker={worker} />
+              </span>
               <span className="mt-1 block text-sm text-slate-400">
                 {worker.push} | {worker.disposition} | {worker.brandOrShow || "Brand or Show unmapped"}
               </span>
@@ -806,6 +809,7 @@ function WeeklyPriorities({ analysis }: { analysis: SaveAnalysis }) {
 type SortDirection = "asc" | "desc";
 type RosterSortKey =
   | "name"
+  | "overallRating"
   | "push"
   | "disposition"
   | "popularity"
@@ -863,6 +867,7 @@ function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
           <thead className="bg-deck-850 text-slate-400">
             <tr>
               <SortableTh label="Name" active={sort.key === "name"} direction={sort.direction} onClick={() => changeSort("name")} />
+              <SortableTh label="Overall" active={sort.key === "overallRating"} direction={sort.direction} onClick={() => changeSort("overallRating")} />
               <SortableTh label="Push" active={sort.key === "push"} direction={sort.direction} onClick={() => changeSort("push")} />
               <SortableTh label="Disposition" active={sort.key === "disposition"} direction={sort.direction} onClick={() => changeSort("disposition")} />
               <SortableTh label="Popularity" active={sort.key === "popularity"} direction={sort.direction} onClick={() => changeSort("popularity")} />
@@ -880,7 +885,13 @@ function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
           <tbody>
             {filteredWorkers.map((worker) => (
               <tr key={worker.id} className="border-t border-white/10">
-                <td className="px-4 py-3 font-semibold">{worker.name}</td>
+                <td className="px-4 py-3 font-semibold">
+                  <div className="flex min-w-44 items-center gap-2">
+                    <span>{worker.name}</span>
+                    <OverallBadge worker={worker} />
+                  </div>
+                </td>
+                <td className="px-4 py-3 font-semibold text-roh-gold">{worker.overallRating || "Unmapped"}</td>
                 <td className="px-4 py-3">{worker.push}</td>
                 <td className="px-4 py-3">{worker.disposition}</td>
                 <td className="px-4 py-3">{worker.popularity}</td>
@@ -931,7 +942,11 @@ function PushGroups({ pushGroups }: { pushGroups: Record<string, WorkerProfile[]
             <div className="mt-4 space-y-2">
               {orderedWorkers.map((worker) => (
                 <div key={worker.id} className="rounded-md bg-deck-850 px-3 py-2 text-sm">
-                  {worker.name} | pop {worker.popularity} | mom {worker.momentum} | fatigue {worker.fatigue}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-semibold">{worker.name}</span>
+                    <OverallBadge worker={worker} />
+                    <span className="text-slate-400">pop {worker.popularity} | mom {worker.momentum} | fatigue {worker.fatigue}</span>
+                  </div>
                 </div>
               ))}
             </div>
@@ -965,7 +980,10 @@ function PushMismatch({ analysis }: { analysis: SaveAnalysis }) {
             <section key={item.worker.id} className={`rounded-md border p-5 ${pushMismatchCardClass(item.label)}`}>
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h3 className="text-lg font-semibold tracking-normal">{item.worker.name}</h3>
+                  <h3 className="flex items-center gap-2 text-lg font-semibold tracking-normal">
+                    <span>{item.worker.name}</span>
+                    <OverallBadge worker={item.worker} />
+                  </h3>
                   <p className="text-sm text-slate-400">Official Push: {item.officialPush}</p>
                   <p className="mt-1 text-sm text-slate-400">Recommended tier: {item.recommendedTier}</p>
                 </div>
@@ -1399,6 +1417,19 @@ function StatusPill({ label, tone }: { label: string; tone: "good" | "warn" | "b
   return <span className={`shrink-0 rounded-md border px-2.5 py-1 text-xs font-semibold ${classes[tone]}`}>{label}</span>;
 }
 
+function OverallBadge({ worker }: { worker: WorkerProfile }) {
+  const breakdown = worker.overallBreakdown;
+  const title = `Overall ${worker.overallRating}: Marketability ${breakdown.marketability}, Star Power ${breakdown.starPower}, Popularity ${breakdown.popularity}, Wrestling Ability ${breakdown.wrestlingAbility}, Psychology ${breakdown.psychology}`;
+  return (
+    <span
+      title={title}
+      className="inline-flex min-w-10 justify-center rounded-md border border-roh-gold/40 bg-roh-gold/15 px-2 py-0.5 text-xs font-bold text-roh-gold"
+    >
+      {worker.overallRating || "-"}
+    </span>
+  );
+}
+
 function SeverityPill({ severity }: { severity: "Low" | "Medium" | "High" | "Critical" }) {
   const tone = severity === "Low" ? "good" : severity === "Medium" ? "warn" : "bad";
   return <StatusPill label={severity} tone={tone} />;
@@ -1532,7 +1563,7 @@ function compareRosterWorkers(
 }
 
 function defaultRosterSortDirection(key: RosterSortKey): SortDirection {
-  return ["popularity", "momentum", "morale", "fatigue", "lastBooked", "recentMatchRatingAverage", "recentSegmentRatingAverage"].includes(key)
+  return ["overallRating", "popularity", "momentum", "morale", "fatigue", "lastBooked", "recentMatchRatingAverage", "recentSegmentRatingAverage"].includes(key)
     ? "desc"
     : "asc";
 }
