@@ -12,7 +12,29 @@ import type {
 } from "./types";
 
 const configKey = "pws-save-auditor-config";
-const browserSampleLimit = 60000;
+const browserDefaultSampleLimit = 50;
+
+const browserTableSampleLimits: Record<string, number> = {
+  saveinfo: 5,
+  promotions: 500,
+  contracts: 6000,
+  workers: 4000,
+  brands: 500,
+  titles: 1000,
+  titlehistory: 15000,
+  events: 2000,
+  eventinstance: 6000,
+  segments: 25000,
+  opponents: 30000,
+  matchtitles: 10000,
+  storylines: 3000,
+  storylineworkers: 6000,
+  storylinehistories: 8000,
+  tagteams: 3000,
+  promotiontagteams: 3000,
+  stables: 1000,
+  stableworkers: 3000,
+};
 
 export const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -193,7 +215,8 @@ function inspectBrowserTables(database: import("sql.js").Database): TableInfo[] 
     const rowCount = Number(rowCountResult[0]?.values[0]?.[0] ?? 0);
     const primaryKey = columns.find((column) => column.primaryKey)?.name;
     const orderClause = primaryKey ? ` ORDER BY "${primaryKey.replace(/"/g, '""')}" DESC` : "";
-    const sampleResult = database.exec(`SELECT * FROM ${escapedName}${orderClause} LIMIT ${browserSampleLimit}`);
+    const sampleLimit = sampleLimitForTable(tableName);
+    const sampleResult = database.exec(`SELECT * FROM ${escapedName}${orderClause} LIMIT ${sampleLimit}`);
     const sampleRows =
       sampleResult[0]?.values.map((row) =>
         Object.fromEntries(sampleResult[0].columns.map((column, index) => [column, row[index]])),
@@ -206,6 +229,10 @@ function inspectBrowserTables(database: import("sql.js").Database): TableInfo[] 
       sampleRows,
     };
   });
+}
+
+function sampleLimitForTable(tableName: string): number {
+  return browserTableSampleLimits[tableName.toLowerCase()] ?? browserDefaultSampleLimit;
 }
 
 function inferLikelyMappings(tables: TableInfo[]): DatabaseInspection["likelyMappings"] {
