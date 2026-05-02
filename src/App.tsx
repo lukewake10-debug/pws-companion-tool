@@ -903,9 +903,11 @@ function RosterAudit({ workers }: { workers: WorkerProfile[] }) {
 }
 
 function PushGroups({ pushGroups }: { pushGroups: Record<string, WorkerProfile[]> }) {
+  const orderedGroups = Object.entries(pushGroups).sort(([left], [right]) => pushGroupRank(right) - pushGroupRank(left));
   return (
     <div className="grid gap-4 xl:grid-cols-2">
-      {Object.entries(pushGroups).map(([push, workers]) => {
+      {orderedGroups.map(([push, workers]) => {
+        const orderedWorkers = [...workers].sort((a, b) => workerPushGroupScore(b) - workerPushGroupScore(a) || a.name.localeCompare(b.name));
         const faces = workers.filter((worker) => /face|baby/i.test(worker.disposition)).length;
         const heels = workers.filter((worker) => /heel/i.test(worker.disposition)).length;
         const wins = workers.reduce((sum, worker) => sum + (worker.recentWins ?? 0), 0);
@@ -927,7 +929,7 @@ function PushGroups({ pushGroups }: { pushGroups: Record<string, WorkerProfile[]
               <MiniMetric label="Not Booked" value={notBooked} />
             </div>
             <div className="mt-4 space-y-2">
-              {workers.map((worker) => (
+              {orderedWorkers.map((worker) => (
                 <div key={worker.id} className="rounded-md bg-deck-850 px-3 py-2 text-sm">
                   {worker.name} | pop {worker.popularity} | mom {worker.momentum} | fatigue {worker.fatigue}
                 </div>
@@ -941,6 +943,9 @@ function PushGroups({ pushGroups }: { pushGroups: Record<string, WorkerProfile[]
 }
 
 function PushMismatch({ analysis }: { analysis: SaveAnalysis }) {
+  const ordered = [...analysis.pushMismatch].sort(
+    (a, b) => b.mismatchDelta - a.mismatchDelta || severityValue(b.severity) - severityValue(a.severity) || b.score - a.score,
+  );
   return (
     <div className="space-y-4">
       <section className="rounded-md border border-white/10 bg-deck-900 p-5">
@@ -955,22 +960,22 @@ function PushMismatch({ analysis }: { analysis: SaveAnalysis }) {
         </div>
       </section>
       <div className="grid gap-4 xl:grid-cols-2">
-        {analysis.pushMismatch.length ? (
-          analysis.pushMismatch.map((item) => (
-            <section key={item.worker.id} className="rounded-md border border-white/10 bg-deck-900 p-5">
+        {ordered.length ? (
+          ordered.map((item) => (
+            <section key={item.worker.id} className={`rounded-md border p-5 ${pushMismatchCardClass(item.label)}`}>
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h3 className="text-lg font-semibold tracking-normal">{item.worker.name}</h3>
                   <p className="text-sm text-slate-400">Official Push: {item.officialPush}</p>
                   <p className="mt-1 text-sm text-slate-400">Recommended tier: {item.recommendedTier}</p>
                 </div>
-                <StatusPill label={item.label} tone={item.severity === "High" || item.severity === "Critical" ? "bad" : item.severity === "Medium" ? "warn" : "good"} />
+                <StatusPill label={item.label} tone={pushMismatchTone(item.label, item.severity)} />
               </div>
               <div className="mt-4 h-3 overflow-hidden rounded-full bg-deck-800">
                 <div className="h-full bg-roh-gold" style={{ width: `${item.score}%` }} />
               </div>
               <p className="mt-3 text-sm text-slate-300">
-                Push Fit Score {item.score}. Evidence: {item.evidence.join("; ")}.
+                Push Fit Score {item.score}. Gap: {item.mismatchDelta} tier{item.mismatchDelta === 1 ? "" : "s"}. Evidence: {item.evidence.join("; ")}.
               </p>
               <p className="mt-2 text-sm text-slate-400">Suggested action: {item.suggestedAction}</p>
             </section>
@@ -1032,8 +1037,8 @@ function Titles({ selectedPromotion, analysis }: { selectedPromotion: string; an
                 <SortableTh label="Prestige" active={sort.key === "prestige"} direction={sort.direction} onClick={() => changeSort("prestige")} />
                 <th className="px-4 py-3 font-medium">Type</th>
                 <SortableTh label="Defences" active={sort.key === "recentDefences"} direction={sort.direction} onClick={() => changeSort("recentDefences")} />
-                <SortableTh label="Days Since Won" active={sort.key === "daysSinceLastDefence"} direction={sort.direction} onClick={() => changeSort("daysSinceLastDefence")} />
-                <th className="px-4 py-3 font-medium">Status</th>
+                <SortableTh label="Days As Champion" active={sort.key === "daysSinceLastDefence"} direction={sort.direction} onClick={() => changeSort("daysSinceLastDefence")} />
+                <th className="px-4 py-3 font-medium">Title Health</th>
               </tr>
             </thead>
             <tbody>
@@ -1045,7 +1050,7 @@ function Titles({ selectedPromotion, analysis }: { selectedPromotion: string; an
                   <td className="px-4 py-3">{title.type || title.genderLimits || "Unmapped"}</td>
                   <td className="px-4 py-3">{title.recentDefences}</td>
                   <td className="px-4 py-3">{title.daysSinceLastDefence ?? "Unmapped"}</td>
-                  <td className="px-4 py-3"><SeverityPill severity={title.warningStatus} /></td>
+                  <td className="px-4 py-3"><TitleHealthPill title={title} /></td>
                 </tr>
               ))}
             </tbody>
@@ -1059,7 +1064,7 @@ function Titles({ selectedPromotion, analysis }: { selectedPromotion: string; an
 }
 
 function BookingWarnings({ analysis }: { analysis: SaveAnalysis }) {
-  const diagnostics = [...analysis.diagnostics].sort((a, b) => severityValue(b.severity) - severityValue(a.severity));
+  const diagnostics = analysis.diagnostics;
   return (
     <div className="space-y-4">
       {diagnostics.length ? (
@@ -1084,10 +1089,10 @@ function BookingWarnings({ analysis }: { analysis: SaveAnalysis }) {
 
 function Rivalries({ analysis }: { analysis: SaveAnalysis }) {
   const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<{ key: "status" | "name" | "averageRating" | "latestRating" | "trend"; direction: SortDirection }>({ key: "status", direction: "desc" });
+  const [sort, setSort] = useState<{ key: "health" | "name" | "averageRating" | "latestRating" | "trend"; direction: SortDirection }>({ key: "health", direction: "desc" });
   const rivalries = analysis.rivalries
-    .filter((rivalry) => `${rivalry.name} ${rivalry.participants.join(" ")} ${rivalry.trend}`.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => sort.key === "status" ? compareValues(severityValue(a.status), severityValue(b.status), sort.direction) : compareValues(a[sort.key], b[sort.key], sort.direction));
+    .filter((rivalry) => `${rivalry.name} ${rivalry.participants.join(" ")} ${rivalry.trend} ${rivalry.healthLabel}`.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => sort.key === "health" ? compareValues(rivalryHealthRank(a.healthLabel), rivalryHealthRank(b.healthLabel), sort.direction) : compareValues(a[sort.key], b[sort.key], sort.direction));
   function changeSort(key: typeof sort.key) {
     setSort((current) => ({ key, direction: current.key === key && current.direction === "asc" ? "desc" : "asc" }));
   }
@@ -1116,7 +1121,7 @@ function Rivalries({ analysis }: { analysis: SaveAnalysis }) {
                 <SortableTh label="Trend" active={sort.key === "trend"} direction={sort.direction} onClick={() => changeSort("trend")} />
                 <SortableTh label="Average" active={sort.key === "averageRating"} direction={sort.direction} onClick={() => changeSort("averageRating")} />
                 <SortableTh label="Latest" active={sort.key === "latestRating"} direction={sort.direction} onClick={() => changeSort("latestRating")} />
-                <SortableTh label="Status" active={sort.key === "status"} direction={sort.direction} onClick={() => changeSort("status")} />
+                <SortableTh label="Health" active={sort.key === "health"} direction={sort.direction} onClick={() => changeSort("health")} />
                 <th className="px-4 py-3 font-medium">Recommendation</th>
               </tr>
             </thead>
@@ -1128,7 +1133,7 @@ function Rivalries({ analysis }: { analysis: SaveAnalysis }) {
                   <td className="px-4 py-3">{rivalry.trend}</td>
                   <td className="px-4 py-3">{rivalry.averageRating ?? "Unmapped"}</td>
                   <td className="px-4 py-3">{rivalry.latestRating ?? "Unmapped"}</td>
-                  <td className="px-4 py-3"><SeverityPill severity={rivalry.status} /></td>
+                  <td className="px-4 py-3"><RivalryHealthPill label={rivalry.healthLabel} /></td>
                   <td className="px-4 py-3 text-slate-300">{rivalry.recommendation}</td>
                 </tr>
               ))}
@@ -1384,11 +1389,12 @@ function SafetyList() {
   );
 }
 
-function StatusPill({ label, tone }: { label: string; tone: "good" | "warn" | "bad" }) {
+function StatusPill({ label, tone }: { label: string; tone: "good" | "warn" | "bad" | "info" }) {
   const classes = {
     good: "border-emerald-400/30 bg-emerald-400/10 text-emerald-100",
     warn: "border-roh-gold/35 bg-roh-gold/10 text-amber-100",
     bad: "border-roh-red/40 bg-roh-red/10 text-red-100",
+    info: "border-roh-cyan/35 bg-roh-cyan/10 text-cyan-100",
   };
   return <span className={`shrink-0 rounded-md border px-2.5 py-1 text-xs font-semibold ${classes[tone]}`}>{label}</span>;
 }
@@ -1396,6 +1402,17 @@ function StatusPill({ label, tone }: { label: string; tone: "good" | "warn" | "b
 function SeverityPill({ severity }: { severity: "Low" | "Medium" | "High" | "Critical" }) {
   const tone = severity === "Low" ? "good" : severity === "Medium" ? "warn" : "bad";
   return <StatusPill label={severity} tone={tone} />;
+}
+
+function TitleHealthPill({ title }: { title: SaveAnalysis["titles"][number] }) {
+  const label = titleHealthLabel(title);
+  const tone = label === "Healthy" ? "good" : label === "Monitor" || label === "Needs Data" ? "warn" : "bad";
+  return <StatusPill label={label} tone={tone} />;
+}
+
+function RivalryHealthPill({ label }: { label: SaveAnalysis["rivalries"][number]["healthLabel"] }) {
+  const tone = label === "Hot" || label === "Healthy" ? "good" : label === "Stale" ? "bad" : "warn";
+  return <StatusPill label={label} tone={tone} />;
 }
 
 function buildTableColumnOptions(inspection: DatabaseInspection | null): string[] {
@@ -1555,6 +1572,61 @@ function uiWorkerQuality(worker: WorkerProfile): number {
 
 function severityValue(severity: "Low" | "Medium" | "High" | "Critical"): number {
   return { Low: 1, Medium: 2, High: 3, Critical: 4 }[severity];
+}
+
+function pushGroupRank(push: string): number {
+  const value = normalizeUi(push);
+  if (value.includes("mainevent")) return 6;
+  if (value.includes("upper")) return 5;
+  if (value.includes("midcard") && !value.includes("lower")) return 4;
+  if (value.includes("lower")) return 3;
+  if (value.includes("opener")) return 2;
+  if (value.includes("enhancement")) return 1;
+  return 0;
+}
+
+function workerPushGroupScore(worker: WorkerProfile): number {
+  return worker.popularity * 0.6 + worker.momentum * 0.4;
+}
+
+function pushMismatchTone(label: string, severity: "Low" | "Medium" | "High" | "Critical"): "good" | "warn" | "bad" | "info" {
+  if (label === "Correctly Positioned" || label === "Creative Override Active") return "good";
+  if (label.includes("Upward") || label.includes("Under-positioned")) return "info";
+  if (severity === "High" || severity === "Critical") return "bad";
+  return severity === "Medium" ? "warn" : "info";
+}
+
+function pushMismatchCardClass(label: string): string {
+  if (label === "Correctly Positioned" || label === "Creative Override Active") {
+    return "border-emerald-400/20 bg-emerald-400/5";
+  }
+  if (label.includes("Upward") || label.includes("Under-positioned")) {
+    return "border-roh-cyan/30 bg-roh-cyan/5";
+  }
+  if (label.includes("High")) return "border-roh-red/35 bg-roh-red/5";
+  return "border-roh-gold/30 bg-roh-gold/5";
+}
+
+function titleHealthLabel(title: SaveAnalysis["titles"][number]): string {
+  if (title.daysSinceLastDefence === null) return "Needs Data";
+  if (title.daysSinceLastDefence >= 90 || title.warningStatus === "Critical") return "Critical inactivity";
+  if (title.daysSinceLastDefence >= 60 || title.warningStatus === "High") return "Needs Defence";
+  if (title.daysSinceLastDefence >= 35 || title.warningStatus === "Medium") return "Monitor";
+  return "Healthy";
+}
+
+function rivalryHealthRank(label: SaveAnalysis["rivalries"][number]["healthLabel"]): number {
+  return {
+    Stale: 5,
+    "Needs Participants": 4,
+    "Needs Data": 3,
+    Hot: 2,
+    Healthy: 1,
+  }[label];
+}
+
+function normalizeUi(value: string): string {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function splitCamel(value: string): string {

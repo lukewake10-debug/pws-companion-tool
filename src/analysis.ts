@@ -302,6 +302,7 @@ function extractPwsWorkers(
 function extractPwsTitles(inspection: DatabaseInspection, promotionId: string): TitleRecord[] {
   const titles = getTable(inspection, "titles")?.sampleRows || [];
   const workers = new Map((getTable(inspection, "workers")?.sampleRows || []).map((row) => [String(row.workerID), String(row.name || "")]));
+  const saveDate = String(getTable(inspection, "saveinfo")?.sampleRows[0]?.saveCurrentDate || "");
 
   return titles
     .filter((title) => String(title.promotionID) === String(promotionId) && Number(title.inactive) === 0)
@@ -317,10 +318,10 @@ function extractPwsTitles(inspection: DatabaseInspection, promotionId: string): 
         company: String(promotionId),
         champion: champions.join(", ") || unknown,
         lastDefenceDate: won,
-        daysSinceLastDefence: daysSince(won),
+        daysSinceLastDefence: daysBetween(won, saveDate),
         recentDefences: Number(title.defences || 0),
         recentChallengers: [],
-        warningStatus: titleSeverity(won),
+        warningStatus: titleSeverityFromDays(daysBetween(won, saveDate)),
         prestige: Math.round(Number(title.prestige || 0)),
         type: String(title.type || ""),
         genderLimits: String(title.genderLimits || ""),
@@ -368,6 +369,16 @@ function extractPwsRivalries(inspection: DatabaseInspection, promotionId: string
               ? "Cooling"
               : "Stable";
       const status: Severity = trend === "Cooling" ? "High" : participants.length < 2 ? "Medium" : "Low";
+      const healthLabel: RivalryRecord["healthLabel"] =
+        participants.length < 2
+          ? "Needs Participants"
+          : trend === "Cooling"
+            ? "Stale"
+            : trend === "Rising"
+              ? "Hot"
+              : trend === "Unmapped"
+                ? "Needs Data"
+                : "Healthy";
       return {
         id: String(storyline.storylineID),
         name: String(storyline.storylineName || "Unnamed storyline"),
@@ -380,6 +391,7 @@ function extractPwsRivalries(inspection: DatabaseInspection, promotionId: string
         latestRating,
         trend,
         status,
+        healthLabel,
         recommendation:
           trend === "Cooling"
             ? "Refresh the rivalry with a decisive angle, stipulation, turn, or a new supporting participant."
@@ -941,6 +953,20 @@ function workerQualityScore(worker: WorkerProfile): number {
   );
 }
 
+function topRosterSlice(workers: WorkerProfile[], ratio: number): WorkerProfile[] {
+  const sorted = [...workers].sort((a, b) => workerImportanceScore(b) - workerImportanceScore(a));
+  return sorted.slice(0, Math.max(1, Math.ceil(sorted.length * ratio)));
+}
+
+function workerImportanceScore(worker: WorkerProfile): number {
+  return (
+    pushTier(worker.push) * 100 +
+    (worker.popularity || 0) * 0.8 +
+    (worker.momentum || 0) * 0.6 +
+    (worker.currentTitles.length ? 75 : 0)
+  );
+}
+
 function buildPushMismatch(workers: WorkerProfile[]): PushMismatchResult[] {
   const popularityValues = workers.map((worker) => worker.popularity).filter((value) => value > 0);
   const momentumValues = workers.map((worker) => worker.momentum).filter((value) => value > 0);
@@ -972,6 +998,7 @@ function buildPushMismatch(workers: WorkerProfile[]): PushMismatchResult[] {
       score,
       label,
       severity: label.includes("High") ? "High" : label.includes("Medium") || label.includes("Under") ? "Medium" : "Low",
+      mismatchDelta: Math.abs(officialTier - recommendedTierValue),
       evidence: [
         `Popularity ${worker.popularity || unknown}`,
         `Momentum ${worker.momentum || unknown}`,
@@ -1030,8 +1057,12 @@ function buildDiagnostics(
       ),
     );
 
-  workers
+  const topHalfWorkers = topRosterSlice(workers, 0.5);
+  const importantWorkers = topRosterSlice(workers, 0.65);
+
+  importantWorkers
     .filter((worker) => worker.warnings.some((warning) => warning.includes("fatigue")))
+    .sort((a, b) => workerImportanceScore(b) - workerImportanceScore(a) || b.fatigue - a.fatigue)
     .slice(0, 5)
     .forEach((worker) =>
       add(
@@ -1044,13 +1075,14 @@ function buildDiagnostics(
       ),
     );
 
-  workers
-    .filter((worker) => worker.morale > 0 && worker.morale <= 35)
+  importantWorkers
+    .filter((worker) => worker.morale <= 35)
+    .sort((a, b) => workerImportanceScore(b) - workerImportanceScore(a) || a.morale - b.morale)
     .slice(0, 5)
     .forEach((worker) =>
       add(
         "Low morale risk.",
-        worker.morale <= 20 ? "Critical" : "High",
+        /main|upper/i.test(worker.push) && worker.morale <= 35 ? "Critical" : worker.morale <= 20 ? "High" : "Medium",
         `${worker.name} morale is ${worker.morale}.`,
         "Low morale can turn a useful roster member into an availability or contract risk.",
         "Give the worker a clear creative beat, a win, or a lighter schedule depending on their role.",
@@ -1058,13 +1090,14 @@ function buildDiagnostics(
       ),
     );
 
-  workers
+  topHalfWorkers
     .filter((worker) => worker.lastBooked === unknown || (daysSince(worker.lastBooked) ?? 0) >= 30)
+    .sort((a, b) => workerImportanceScore(b) - workerImportanceScore(a))
     .slice(0, 8)
     .forEach((worker) =>
       add(
         "Worker has not been booked recently.",
-        /main|upper/i.test(worker.push) ? "High" : "Medium",
+        /main/i.test(worker.push) ? "Critical" : /upper/i.test(worker.push) ? "High" : "Medium",
         `${worker.name} last booked: ${worker.lastBooked}. Official Push: ${worker.push}.`,
         "Long gaps can cool momentum, especially for workers expected to matter on the card.",
         "Either book them soon, add a Creative Plan, or mark Ignore from Audit if they are intentionally inactive.",
@@ -1161,11 +1194,13 @@ function buildDiagnostics(
       ),
     );
 
-  return diagnostics.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+  return diagnostics.sort((a, b) => diagnosticPriorityScore(b) - diagnosticPriorityScore(a));
 }
 
 function buildWeeklyPriorities(diagnostics: Diagnostic[]): WeeklyPriority[] {
-  const sorted = [...diagnostics].sort((a, b) => severityRank(b.severity) - severityRank(a.severity)).slice(0, 5);
+  const sorted = [...diagnostics]
+    .sort((a, b) => diagnosticPriorityScore(b) - diagnosticPriorityScore(a))
+    .slice(0, 5);
   return sorted.map((diagnostic, index) => ({
     priorityNumber: index + 1,
     issue: diagnostic.problem,
@@ -1174,6 +1209,14 @@ function buildWeeklyPriorities(diagnostics: Diagnostic[]): WeeklyPriority[] {
     severity: diagnostic.severity,
     supportingEvidence: diagnostic.whyItMatters,
   }));
+}
+
+function diagnosticPriorityScore(diagnostic: Diagnostic): number {
+  let score = severityRank(diagnostic.severity) * 100;
+  if (/Main Event|Upper Midcard|champion|title|Official Push Main Event|Official Push Upper/i.test(diagnostic.evidence)) score += 35;
+  if (/not been booked|Low morale|High fatigue|Push Mismatch/i.test(diagnostic.problem)) score += 20;
+  if (/Lower Midcard|Enhancement|Opener/i.test(diagnostic.evidence)) score -= 35;
+  return score;
 }
 
 function filterRecordsToRoster<T extends { participants: string[] }>(records: T[], workers: WorkerProfile[]): T[] {
@@ -1400,9 +1443,23 @@ function dateSortValue(value: string): number {
 }
 
 function daysSince(value: string): number | null {
-  const time = Date.parse(value);
+  const time = parsePwsDate(value);
   if (!Number.isFinite(time)) return null;
   return Math.max(0, Math.floor((Date.now() - time) / 86_400_000));
+}
+
+function daysBetween(startValue: string, endValue: string): number | null {
+  const start = parsePwsDate(startValue);
+  const end = parsePwsDate(endValue);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return Math.max(0, Math.floor((end - start) / 86_400_000));
+}
+
+function parsePwsDate(value: string): number {
+  if (!value || value === unknown) return Number.NaN;
+  const parts = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (parts) return new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])).getTime();
+  return Date.parse(value);
 }
 
 function unique(values: string[]): string[] {
@@ -1411,6 +1468,10 @@ function unique(values: string[]): string[] {
 
 function titleSeverity(value: string): Severity {
   const days = daysSince(value);
+  return titleSeverityFromDays(days);
+}
+
+function titleSeverityFromDays(days: number | null): Severity {
   if (days === null) return "Medium";
   if (days >= 90) return "Critical";
   if (days >= 60) return "High";

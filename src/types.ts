@@ -182,6 +182,7 @@ export interface RivalryRecord {
   latestRating: number | null;
   trend: "Rising" | "Cooling" | "Stable" | "Unmapped";
   status: Severity;
+  healthLabel: "Hot" | "Healthy" | "Stale" | "Needs Data" | "Needs Participants";
   recommendation: string;
 }
 
@@ -192,6 +193,7 @@ export interface PushMismatchResult {
   score: number;
   label: string;
   severity: Severity;
+  mismatchDelta: number;
   evidence: string[];
   suggestedAction: string;
 }
