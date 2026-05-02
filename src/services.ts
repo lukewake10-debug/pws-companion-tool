@@ -199,6 +199,9 @@ function inspectBrowserTables(database: import("sql.js").Database): TableInfo[] 
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
   );
   const tableNames = result[0]?.values.map((row) => String(row[0])) ?? [];
+  const pwsSchema = ["saveinfo", "promotions", "contracts", "workers", "events", "eventinstance", "segments", "opponents"].every((name) =>
+    tableNames.some((tableName) => tableName.toLowerCase() === name),
+  );
 
   return tableNames.map((tableName) => {
     const escapedName = escapeIdentifier(tableName);
@@ -213,14 +216,9 @@ function inspectBrowserTables(database: import("sql.js").Database): TableInfo[] 
 
     const rowCountResult = database.exec(`SELECT COUNT(*) AS count FROM ${escapedName}`);
     const rowCount = Number(rowCountResult[0]?.values[0]?.[0] ?? 0);
-    const primaryKey = columns.find((column) => column.primaryKey)?.name;
-    const orderClause = primaryKey ? ` ORDER BY "${primaryKey.replace(/"/g, '""')}" DESC` : "";
-    const sampleLimit = sampleLimitForTable(tableName);
-    const sampleResult = database.exec(`SELECT * FROM ${escapedName}${orderClause} LIMIT ${sampleLimit}`);
-    const sampleRows =
-      sampleResult[0]?.values.map((row) =>
-        Object.fromEntries(sampleResult[0].columns.map((column, index) => [column, row[index]])),
-      ) ?? [];
+    const sampleRows = pwsSchema
+      ? pwsSampleRows(database, tableName, columns)
+      : defaultSampleRows(database, tableName, columns);
 
     return {
       name: tableName,
@@ -229,6 +227,109 @@ function inspectBrowserTables(database: import("sql.js").Database): TableInfo[] 
       sampleRows,
     };
   });
+}
+
+function defaultSampleRows(database: import("sql.js").Database, tableName: string, columns: ColumnInfo[]): Record<string, unknown>[] {
+  const escapedName = escapeIdentifier(tableName);
+  const primaryKey = columns.find((column) => column.primaryKey)?.name;
+  const orderClause = primaryKey ? ` ORDER BY "${primaryKey.replace(/"/g, '""')}" DESC` : "";
+  const sampleLimit = sampleLimitForTable(tableName);
+  return rowsFromExec(database.exec(`SELECT * FROM ${escapedName}${orderClause} LIMIT ${sampleLimit}`));
+}
+
+function pwsSampleRows(database: import("sql.js").Database, tableName: string, columns: ColumnInfo[]): Record<string, unknown>[] {
+  const normalized = tableName.toLowerCase();
+  const userPromotionSql = "(SELECT saveUserPromotion FROM saveinfo LIMIT 1)";
+  const recentInstancesSql = `
+    SELECT i.instanceID
+    FROM eventinstance i
+    JOIN events e ON e.eventID = i.eventID
+    WHERE e.promotionID = ${userPromotionSql} AND i.complete = 1
+    ORDER BY i.airDate DESC, i.instanceID DESC
+    LIMIT 120
+  `;
+  const recentSegmentsSql = `
+    SELECT s.segmentID
+    FROM segments s
+    WHERE s.showID IN (${recentInstancesSql})
+  `;
+
+  try {
+    if (normalized === "saveinfo") return rowsFromExec(database.exec("SELECT * FROM saveinfo LIMIT 1"));
+    if (normalized === "promotions") return rowsFromExec(database.exec(`SELECT * FROM promotions WHERE promotionID = ${userPromotionSql} OR shortName IS NOT NULL ORDER BY promotionID LIMIT 500`));
+    if (normalized === "contracts") {
+      return rowsFromExec(database.exec(`
+        SELECT * FROM contracts
+        WHERE promotionID = ${userPromotionSql}
+          AND finalised = 1
+          AND expired = 0
+          AND suspended = 0
+        ORDER BY contractID DESC
+        LIMIT 300
+      `));
+    }
+    if (normalized === "workers") {
+      return rowsFromExec(database.exec(`
+        SELECT * FROM workers
+        WHERE workerID IN (
+          SELECT workerID FROM contracts WHERE promotionID = ${userPromotionSql}
+          UNION SELECT currentChampion FROM titles WHERE promotionID = ${userPromotionSql} AND currentChampion IS NOT NULL
+          UNION SELECT currentChampion2 FROM titles WHERE promotionID = ${userPromotionSql} AND currentChampion2 IS NOT NULL AND currentChampion2 != ''
+          UNION SELECT currentChampion3 FROM titles WHERE promotionID = ${userPromotionSql} AND currentChampion3 IS NOT NULL AND currentChampion3 != ''
+          UNION SELECT workerID FROM opponents WHERE segmentID IN (${recentSegmentsSql})
+        )
+        LIMIT 1500
+      `));
+    }
+    if (normalized === "events") return rowsFromExec(database.exec(`SELECT * FROM events WHERE promotionID = ${userPromotionSql} ORDER BY eventID DESC LIMIT 500`));
+    if (normalized === "eventinstance") {
+      return rowsFromExec(database.exec(`
+        SELECT i.* FROM eventinstance i
+        JOIN events e ON e.eventID = i.eventID
+        WHERE e.promotionID = ${userPromotionSql} AND i.complete = 1
+        ORDER BY i.airDate DESC, i.instanceID DESC
+        LIMIT 120
+      `));
+    }
+    if (normalized === "segments") {
+      return rowsFromExec(database.exec(`
+        SELECT * FROM segments
+        WHERE showID IN (${recentInstancesSql})
+        ORDER BY showID DESC, segmentorder ASC
+        LIMIT 2500
+      `));
+    }
+    if (normalized === "opponents") {
+      return rowsFromExec(database.exec(`
+        SELECT * FROM opponents
+        WHERE segmentID IN (${recentSegmentsSql})
+        LIMIT 8000
+      `));
+    }
+    if (normalized === "titles") return rowsFromExec(database.exec(`SELECT * FROM titles WHERE promotionID = ${userPromotionSql} LIMIT 200`));
+    if (normalized === "titlehistory") return rowsFromExec(database.exec(`SELECT * FROM titlehistory WHERE titleID IN (SELECT titleID FROM titles WHERE promotionID = ${userPromotionSql}) ORDER BY titleHistoryID DESC LIMIT 1000`));
+    if (normalized === "brands") return rowsFromExec(database.exec(`SELECT * FROM brands WHERE promotionID = ${userPromotionSql} LIMIT 100`));
+    if (normalized === "matchtitles") return rowsFromExec(database.exec(`SELECT * FROM matchtitles WHERE segmentID IN (${recentSegmentsSql}) LIMIT 1000`));
+    if (normalized === "storylines") return rowsFromExec(database.exec(`SELECT * FROM storylines WHERE promotionID = ${userPromotionSql} ORDER BY storylineID DESC LIMIT 500`));
+    if (normalized === "storylineworkers") return rowsFromExec(database.exec("SELECT * FROM storylineworkers ORDER BY storylineWorkerID DESC LIMIT 1000"));
+    if (normalized === "storylinehistories") return rowsFromExec(database.exec("SELECT * FROM storylinehistories ORDER BY historyID DESC LIMIT 1000"));
+    if (normalized === "tagteams") return rowsFromExec(database.exec("SELECT * FROM tagteams ORDER BY tagID DESC LIMIT 1000"));
+    if (normalized === "promotiontagteams") return rowsFromExec(database.exec(`SELECT * FROM promotiontagteams WHERE promotionID = ${userPromotionSql} LIMIT 1000`));
+    if (normalized === "stables") return rowsFromExec(database.exec(`SELECT * FROM stables WHERE promotionID = ${userPromotionSql} LIMIT 500`));
+    if (normalized === "stableworkers") return rowsFromExec(database.exec("SELECT * FROM stableworkers ORDER BY stableWorkerID DESC LIMIT 1000"));
+  } catch (error) {
+    console.warn(`PWS targeted sample failed for ${tableName}`, error);
+  }
+
+  return rowsFromExec(database.exec(`SELECT * FROM ${escapeIdentifier(tableName)} LIMIT ${browserDefaultSampleLimit}`));
+}
+
+function rowsFromExec(result: Array<{ columns: string[]; values: unknown[][] }>): Record<string, unknown>[] {
+  return (
+    result[0]?.values.map((row: unknown[]) =>
+      Object.fromEntries(result[0].columns.map((column: string, index: number) => [column, row[index]])),
+    ) ?? []
+  );
 }
 
 function sampleLimitForTable(tableName: string): number {
