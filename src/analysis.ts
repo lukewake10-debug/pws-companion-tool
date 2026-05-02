@@ -449,6 +449,7 @@ function extractPwsRecords(
       const event = instance ? eventById.get(String(instance.eventID)) : null;
       const participantRows = opponentsBySegment.get(String(segment.segmentID)) || [];
       const participants = unique(participantRows.map((row) => workers.get(String(row.workerID)) || String(row.workerName || "")).filter(Boolean));
+      const sideParticipants = buildOpponentSides(participantRows, workers);
       const winner = workers.get(String(segment.winnerWorkerID)) || workers.get(String(segment.winner)) || String(segment.winnerName || "");
       const losers = unique(participantRows.filter((row) => winner && (workers.get(String(row.workerID)) || "") !== winner).map((row) => workers.get(String(row.workerID)) || "").filter(Boolean));
       const common = {
@@ -467,6 +468,7 @@ function extractPwsRecords(
           showType: String(event?.importance || unknown),
           matchOrder: pickNumber(segment, ["segmentorder"]),
           matchType: String(segment.gimmick || segment.matchStoryID || segment.winType || unknown),
+          sideParticipants,
           winner: winner || unknown,
           loser: losers.join(", ") || unknown,
           titleInvolved: "",
@@ -1270,10 +1272,10 @@ function buildDiagnostics(
     add(
       "Repetitive matchup risk.",
       "Medium",
-      `${pair.pair} appears ${pair.count} times in imported match samples.`,
+      `${pair.pair} appears ${pair.count} times in imported completed matches.`,
       "Repeated matches can cool off otherwise useful programmes.",
       "Rotate the matchup format or move the rivalry forward with a different booking beat.",
-      "Use a tag, contender match, stipulation escalation or angle instead of another straight rematch.",
+      "Use a different opponent, stipulation escalation, angle, or contender path instead of repeating the same matchup.",
     ),
   );
 
@@ -1366,6 +1368,21 @@ function groupRows(rows: Record<string, unknown>[], key: string): Map<string, Re
     result.set(value, [...(result.get(value) || []), row]);
     return result;
   }, new Map<string, Record<string, unknown>[]>());
+}
+
+function buildOpponentSides(rows: Record<string, unknown>[], workers: Map<string, string>): string[][] {
+  const sides = new Map<string, string[]>();
+  rows
+    .filter((row) => Number(row.isRingside || 0) !== 1)
+    .forEach((row) => {
+      const side = String(row.opponentSet ?? "0");
+      const worker = workers.get(String(row.workerID)) || String(row.workerName || "");
+      if (!worker) return;
+      sides.set(side, unique([...(sides.get(side) || []), worker]));
+    });
+  return [...sides.entries()]
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .map(([, sideWorkers]) => sideWorkers.sort((left, right) => left.localeCompare(right)));
 }
 
 function derivePromotions(inspection: DatabaseInspection, companyLookup: Record<string, string>): string[] {
@@ -1651,14 +1668,28 @@ function pushTier(push: string): number {
 function repeatedPairings(matches: MatchRecord[]): Array<{ pair: string; count: number }> {
   const counts = new Map<string, number>();
   matches.forEach((match) => {
-    if (match.participants.length < 2) return;
-    const pair = match.participants.slice(0, 2).map((value) => value.trim()).sort().join(" vs ");
+    const sides = canonicalMatchSides(match);
+    if (sides.length < 2) return;
+    const pair = sides.join(" vs ");
     counts.set(pair, (counts.get(pair) ?? 0) + 1);
   });
   return [...counts.entries()]
     .map(([pair, count]) => ({ pair, count }))
     .filter((item) => item.count >= 3)
     .sort((a, b) => b.count - a.count);
+}
+
+function canonicalMatchSides(match: MatchRecord): string[] {
+  const sides = match.sideParticipants
+    ?.map((side) => unique(side.map((worker) => worker.trim()).filter(Boolean)).sort((left, right) => left.localeCompare(right)))
+    .filter((side) => side.length);
+  if (sides && sides.length >= 2) {
+    return sides.map((side) => side.join(" & ")).sort((left, right) => left.localeCompare(right));
+  }
+  if (match.participants.length === 2) {
+    return match.participants.map((participant) => participant.trim()).filter(Boolean).sort((left, right) => left.localeCompare(right));
+  }
+  return [];
 }
 
 function severityRank(severity: Severity): number {

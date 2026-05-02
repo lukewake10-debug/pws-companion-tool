@@ -145,6 +145,7 @@ export interface MatchRecord {
   matchOrder: number | null;
   matchType: string;
   participants: string[];
+  sideParticipants?: string[][];
   winner: string;
   loser: string;
   titleInvolved: string;
